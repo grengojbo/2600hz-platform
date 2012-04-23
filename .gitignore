@@ -20,3 +20,9 @@ utils/*/ebin/*.app
 #*
 .#*
 /whistle_apps/erl_crash.dump
+.project
+*.settings/
+.idea/*
+ecallmgr/include
+whistle_apps/include
+
