@@ -25,4 +25,5 @@ utils/*/ebin/*.app
 .idea/*
 ecallmgr/include
 whistle_apps/include
-
+*.sublime-project
+*.sublime-workspace
