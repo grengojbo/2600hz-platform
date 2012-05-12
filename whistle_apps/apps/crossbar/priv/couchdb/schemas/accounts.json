@@ -20,7 +20,7 @@
          "description":"The default timezone",
          "required":"true",
          "type":"string",
-         "default":"America/Los_Angeles",
+         "default":"Europe/Kiev",
          "minLength":5,
          "maxLength":32
       },
