@@ -75,13 +75,13 @@ behaviour_info(_) ->
 -type responder_callback_mappings() :: [responder_callback_mapping(),...] | [].
 -type responder_start_params() :: [{responder_callback_mod(), responder_callback_mappings()},...].
 
--type start_params() :: [{responders, responder_start_params()} |
-                         {bindings, bindings()} |
-                         {queue_name, binary()} |
-                         {queue_options, wh_proplist()} |
-                         {consume_options, wh_proplist()} |
-                         {basic_qos, non_neg_integer()}
-                         ,...].
+-type start_params() :: [{'responders', responder_start_params()} |
+                         {'bindings', bindings()} |
+                         {'queue_name', binary()} |
+                         {'queue_options', wh_proplist()} |
+                         {'consume_options', wh_proplist()} |
+                         {'basic_qos', non_neg_integer()}
+                         ].
 
 -record(state, {
           queue = <<>> :: binary()
@@ -135,13 +135,12 @@ reply(From, Msg) ->
     gen_server:reply(From, Msg).
 
 %% Starting the gen_server
--spec start_link/3 :: (atom(), start_params(), term()) -> startlink_ret().
+-spec start_link/3 :: (atom(), start_params(), list()) -> startlink_ret().
+-spec start_link/4 :: ({'local', atom()} | {'global', term()}, atom(), start_params(), list()) -> startlink_ret().
 start_link(Module, Params, InitArgs) ->
     gen_server:start_link(?MODULE, [Module, Params, InitArgs], []).
-
--spec start_link/4 :: ({local, atom()} | {global, term()}, atom(), start_params(), term()) -> startlink_ret().
 start_link(Name, Module, Params, InitArgs) ->
-    gen_server:start_link(Name, ?MODULE, [Module, Params, InitArgs], []).
+    gen_server:start_link(Name, ?MODULE, [Module, Params, InitArgs], [{timeout, infinity}]).
 
 -spec stop/1 :: (pid()) -> 'ok'.
 stop(Srv) when is_pid(Srv) ->
@@ -471,8 +470,10 @@ process_req(#state{responders=Responders, active_responders=ARs}=State, JObj, BD
     case handle_callback_event(State, JObj) of
         ignore -> State;
         Props ->
+            PublishAs = self(),
             Pid = proc_lib:spawn_link(fun() -> 
                                               _ = wh_util:put_callid(JObj),
+                                              put(amqp_publish_as, PublishAs),
                                               process_req(Props, Responders, JObj, BD) 
                                       end),
             State#state{active_responders=[Pid | ARs]}
@@ -481,9 +482,10 @@ process_req(#state{responders=Responders, active_responders=ARs}=State, JObj, BD
 -spec process_req/4 :: (wh_proplist(), listener_utils:responders(), wh_json:json_object(), #'basic.deliver'{}) -> 'ok'.
 process_req(Props, Responders, JObj, BD) ->
     Key = wh_util:get_event_type(JObj),
-
+    PublishAs = get(amqp_publish_as),
     Handlers = [spawn_monitor(fun() ->
                                       _ = wh_util:put_callid(JObj),
+                                      put(amqp_publish_as, PublishAs),
                                       case erlang:function_exported(Responder, Fun, 3) of
                                           true -> Responder:Fun(JObj, Props, BD);
                                           false -> Responder:Fun(JObj, Props)
@@ -541,6 +543,7 @@ start_amqp(Props) ->
                     ConsumeProps = props:get_value(consume_options, Props, []),
                     set_qos(props:get_value(basic_qos, Props)),
                     ok = amqp_util:basic_consume(Q, ConsumeProps),
+                    lager:debug("started amqp with queue ~s", [Q]),
                     {ok, Q}
             end
     end.
@@ -616,20 +619,19 @@ next_timeout(Timeout) when Timeout < ?START_TIMEOUT ->
 next_timeout(Timeout) ->
     Timeout * 2.
 
-
 -spec add_other_queue/4 :: (binary(), proplist(), proplist(), #state{}) -> {ne_binary(), #state{}}.
 add_other_queue(<<>>, QueueProps, Bindings, #state{other_queues=OtherQueues}=State) ->
     {ok, Q} = start_amqp(QueueProps),
     _ = [create_binding(wh_util:to_binary(Type), BindProps, Q) || {Type, BindProps} <- Bindings],
     {Q, State#state{other_queues=[{Q, {Bindings, QueueProps}}|OtherQueues]}};
 add_other_queue(QueueName, QueueProps, Bindings, #state{other_queues=OtherQueues}=State) ->
-    {ok, _} = start_amqp([{queue_name, QueueName} | QueueProps]),
-    _ = [create_binding(wh_util:to_binary(Type), BindProps, QueueName) || {Type, BindProps} <- Bindings],
+    {ok, Q} = start_amqp([{queue_name, QueueName} | QueueProps]),
+    _ = [create_binding(wh_util:to_binary(Type), BindProps, Q) || {Type, BindProps} <- Bindings],
     case props:get_value(QueueName, OtherQueues) of
         undefined ->
-            {QueueName, State#state{other_queues=[{QueueName, {Bindings, QueueProps}}|OtherQueues]}};
+            {Q, State#state{other_queues=[{Q, {Bindings, QueueProps}}|OtherQueues]}};
         OldBindings ->
-            {QueueName, State#state{other_queues=[{QueueName, {Bindings ++ OldBindings, QueueProps}}
-                                                  | props:delete(QueueName, OtherQueues)
-                                                 ]}}
+            {Q, State#state{other_queues=[{Q, {Bindings ++ OldBindings, QueueProps}}
+                                          | props:delete(QueueName, OtherQueues)
+                                         ]}}
     end.
