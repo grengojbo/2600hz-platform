@@ -21,6 +21,8 @@
 
 -define(CACHE_TTL, whapps_config:get_integer(<<"crossbar">>, <<"cache_ttl">>, 300)).
 
+-define(CROSSBAR_DEFAULT_CONTENT_TYPE, {<<"application">>, <<"json">>, []}).
+
 -define(CONTENT_PROVIDED, [{to_json, [{<<"application">>, <<"json">>},{<<"application">>, <<"x-json">>}]}]).
 -define(CONTENT_ACCEPTED, [{from_json, [{<<"application">>, <<"json">>},{<<"application">>, <<"x-json">>}]}
                            ,{from_form, [{<<"application">>, <<"x-www-form-urlencoded">>}]}
@@ -37,8 +39,8 @@
 -define(CROSSBAR_CACHE, crossbar_cache).
 
 -record(cb_context, {
-           content_types_provided = ?CONTENT_PROVIDED :: [crossbar_content_handler(),...] | []
-          ,content_types_accepted = ?CONTENT_ACCEPTED :: [crossbar_content_handler(),...] | []
+           content_types_provided = [] :: [crossbar_content_handler(),...] | []
+          ,content_types_accepted = [] :: [crossbar_content_handler(),...] | []
           ,allowed_methods = ?ALLOWED_METHODS :: [atom(),...] | []
           ,allow_methods = ?ALLOWED_METHODS :: [atom(),...] | []
           ,languages_provided = [<<"en">>, <<"en-us">>] :: [ne_binary(),...] %% english by default
@@ -48,7 +50,7 @@
           ,auth_account_id = 'undefined' :: 'undefined' | ne_binary()
           ,auth_doc = 'undefined' :: wh_json:json_object() | 'undefined'
           ,req_verb = <<"get">> :: ne_binary() % <<"get">>, <<"post">>, <<"put">>, <<"delete">>, <<"head">>
-          ,req_nouns = [{<<"404">>, []}] :: [{ne_binary(), list()},...] | []
+          ,req_nouns = [{<<"404">>, []}] :: [{ne_binary(), wh_json:json_strings()},...] | [] % {module, [id]} most typical
           ,req_json = wh_json:new() :: wh_json:json_object() | {'malformed', binary()} %% the request JSON envelope
           ,req_files = [] :: [{ne_binary(), wh_json:json_object()},...] | [] %% {file_name, {"contents":<<bin>>, "headers":{"content-type":"", "content-length":1}}}
           ,req_data = wh_json:new() :: wh_json:json_objects()  % the "data" from the request JSON envelope

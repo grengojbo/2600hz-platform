@@ -175,11 +175,13 @@
 -define(RING_REQ_TYPES, []).
 
 %% Hangup
+%% Include the Other-Leg-Call-ID to only hangup the other leg
 -define(HANGUP_REQ_HEADERS, [<<"Application-Name">>, <<"Call-ID">>]).
--define(OPTIONAL_HANGUP_REQ_HEADERS, [<<"Insert-At">>]).
+-define(OPTIONAL_HANGUP_REQ_HEADERS, [<<"Insert-At">>, <<"Other-Leg-Only">>]).
 -define(HANGUP_REQ_VALUES, [{<<"Event-Category">>, <<"call">>}
                             ,{<<"Event-Name">>, <<"command">>}
                             ,{<<"Application-Name">>, <<"hangup">>}
+                            ,{<<"Other-Leg-Only">>, [<<"true">>, <<"false">>, true, false]}
                             ,?INSERT_AT_TUPLE
                            ]).
 -define(HANGUP_REQ_TYPES, []).
@@ -231,7 +233,9 @@
 %% Call Pickup
 -define(CALL_PICKUP_REQ_HEADERS, [<<"Application-Name">>, <<"Call-ID">>, <<"Target-Call-ID">>]).
 -define(OPTIONAL_CALL_PICKUP_REQ_HEADERS, [<<"Insert-At">>, <<"Unbridged-Only">>, <<"Unanswered-Only">>
-                                               ,<<"Other-Leg">>]).
+                                               ,<<"Other-Leg">>
+                                               ,<<"Continue-On-Fail">>, <<"Continue-On-Cancel">>
+                                          ]).
 -define(CALL_PICKUP_REQ_VALUES, [{<<"Event-Category">>, <<"call">>}
                                  ,{<<"Event-Name">>, <<"command">>}
                                  ,{<<"Application-Name">>, <<"call_pickup">>}
@@ -241,10 +245,11 @@
 
 %% Play Request
 -define(PLAY_REQ_HEADERS, [<<"Application-Name">>, <<"Call-ID">>, <<"Media-Name">>]).
--define(OPTIONAL_PLAY_REQ_HEADERS, [<<"Terminators">>, <<"Insert-At">>]).
+-define(OPTIONAL_PLAY_REQ_HEADERS, [<<"Terminators">>, <<"Insert-At">>, <<"Leg">>]).
 -define(PLAY_REQ_VALUES, [{<<"Event-Category">>, <<"call">>}
                           ,{<<"Event-Name">>, <<"command">>}
                           ,{<<"Application-Name">>, <<"play">>}
+                          ,{<<"Leg">>, [<<"A">>, <<"B">>, <<"Both">>]}
                           ,?INSERT_AT_TUPLE
                          ]).
 -define(PLAY_REQ_TYPES, [{<<"Terminators">>, fun is_list/1}]).
@@ -272,6 +277,8 @@
 -define(RECORD_REQ_TYPES, [{<<"Terminators">>, fun is_list/1}]).
 
 %% Record Call Leg into MediaName
+%% Stream-To = local results in the recording being stored on the media server
+%% Stream-To = remote will stream the recording to the handling ecallmgr server
 -define(RECORD_CALL_REQ_HEADERS, [<<"Application-Name">>, <<"Call-ID">>, <<"Media-Name">>
                                       ,<<"Record-Action">>
                                  ]).

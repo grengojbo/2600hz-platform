@@ -125,7 +125,7 @@ init([Node, Options]) ->
         ok ->
             lager:debug("event handler registered on node ~s", [Node]),            
             ok = freeswitch:event(Node, ['CHANNEL_CREATE', 'CHANNEL_DESTROY', 'CHANNEL_HANGUP_COMPLETE'
-                                         ,'CUSTOM', 'sofia::register', 'sofia::transfer'
+                                         ,'SESSION_HEARTBEAT', 'CUSTOM', 'sofia::register', 'sofia::transfer'
                                         ]),
             lager:debug("bound to switch events on node ~s", [Node]),
             gproc:reg({p, l, fs_node}),
@@ -244,6 +244,7 @@ process_event(<<"CUSTOM">>, _, Data, Node) ->
     ok;
 process_event(<<"CHANNEL_CREATE">>, UUID, Data, Node) ->
     lager:debug("received channel create event: ~s", [UUID]),
+    maybe_start_event_listener(Node, UUID),
     spawn(ecallmgr_fs_nodes, new_channel, [Data, Node]),
     ok;
 process_event(<<"CHANNEL_DESTROY">>, UUID, Data, Node) ->
@@ -256,6 +257,9 @@ process_event(<<"CHANNEL_DESTROY">>, UUID, Data, Node) ->
     end;
 process_event(<<"CHANNEL_HANGUP_COMPLETE">>, UUID, Data, _) ->
     spawn(ecallmgr_call_cdr, new_cdr, [UUID, Data]),
+    ok;
+process_event(<<"SESSION_HEARTBEAT">>, _, Data, Node) ->
+    spawn(ecallmgr_authz, update, [Data, Node]),
     ok;
 process_event(_, _, _, _) ->
     ok.
@@ -455,4 +459,13 @@ show_channels_as_json(Node) ->
                     ]
             end;
         {error, _} -> []
+    end.
+
+maybe_start_event_listener(Node, UUID) ->
+    case wh_cache:fetch_local(?ECALLMGR_UTIL_CACHE, {UUID, start_listener}) of
+        {ok, true} ->
+            lager:debug("starting events for ~s", [UUID]),
+            ecallmgr_call_sup:start_event_process(Node, UUID);
+        _E ->
+            lager:debug("ignoring start events for ~s: ~p", [UUID, _E]), ok
     end.

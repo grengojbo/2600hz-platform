@@ -4,6 +4,7 @@
 %%%
 %%% @end
 %%% @contributors
+%%%   James Aimonetti
 %%%-------------------------------------------------------------------
 -module(ecallmgr_call_sup).
 
@@ -15,7 +16,8 @@
 -export([start_control_process/2
          ,start_control_process/3
         ]).
--export([start_event_process/2]).
+-export([start_event_process/2
+        ]).
 -export([init/1]).
 
 %% Helper macro for declaring children of supervisor
