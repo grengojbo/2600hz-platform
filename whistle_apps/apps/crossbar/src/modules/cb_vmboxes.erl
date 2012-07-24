@@ -233,10 +233,10 @@ update_vmbox(DocId, #cb_context{req_data=Data}=Context) ->
                       ,Context);
                 false ->
                     Context1 = #cb_context{doc=VMBox, db_name=Db, account_id=AccountId} = crossbar_doc:load_merge(DocId, JObj, Context),
-		    
-		    _ = spawn(fun() -> _ = crossbar_util:put_reqid(Context1), update_mwi(VMBox, AccountId, Db) end),
-		    
-		    Context1
+                    
+                    _ = spawn(fun() -> _ = crossbar_util:put_reqid(Context1), update_mwi(VMBox, AccountId, Db) end),
+                    
+                    Context1
             end
     end.
 
@@ -419,11 +419,11 @@ update_mwi(VMBox, AccountId, DB) ->
     lists:foreach(fun(Device) ->
                           User = wh_json:get_value([<<"sip">>, <<"username">>], Device),
                           Realm = case wh_json:get_ne_value([<<"sip">>, <<"realm">>], Device) of
-				      undefined ->
-					  wh_util:get_account_realm(AccountId);
-				      DeviceRealm ->
-					  DeviceRealm
-				  end,
+                                      undefined ->
+                                          wh_util:get_account_realm(AccountId);
+                                      DeviceRealm ->
+                                          DeviceRealm
+                                  end,
 
                           Command = wh_json:from_list([{<<"Notify-User">>, User}
                                                        ,{<<"Notify-Realm">>, Realm}

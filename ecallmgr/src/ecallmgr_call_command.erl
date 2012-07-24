@@ -266,10 +266,11 @@ get_fs_app(_Node, _UUID, JObj, <<"send_dtmf">>) ->
             {<<"send_dtmf">>, iolist_to_binary([DTMFs, Duration])}
     end;
 
-get_fs_app(_Node, _UUID, JObj, <<"tones">>) ->
+get_fs_app(Node, UUID, JObj, <<"tones">>) ->
     case wapi_dialplan:tones_v(JObj) of
         false -> {'error', <<"tones failed to execute as JObj did not validate">>};
         true ->
+            'ok' = set_terminators(Node, UUID, wh_json:get_value(<<"Terminators">>, JObj)),
             Tones = wh_json:get_value(<<"Tones">>, JObj, []),
             FSTones = [begin
                            Vol = case wh_json:get_value(<<"Volume">>, Tone) of
@@ -700,6 +701,7 @@ amqp_stream(DestQ, F, State, Headers, Seq) ->
             %% send msg
             Msg = [{<<"Media-Content">>, Data}
                    ,{<<"Media-Sequence-ID">>, Seq}
+                   ,{<<"Msg-ID">>, wh_util:to_binary(wh_util:current_tstamp())}
                    | Headers],
             {ok, JSON} = wapi_dialplan:store_amqp_resp(Msg),
             amqp_util:targeted_publish(DestQ, JSON, <<"application/json">>),
@@ -707,6 +709,7 @@ amqp_stream(DestQ, F, State, Headers, Seq) ->
         eof ->
             Msg = [{<<"Media-Content">>, <<"eof">>}
                    ,{<<"Media-Sequence-ID">>, Seq}
+                   ,{<<"Msg-ID">>, wh_util:to_binary(wh_util:current_tstamp())}
                    | Headers],
             {ok, JSON} = wapi_dialplan:store_amqp_resp(Msg),
             amqp_util:targeted_publish(DestQ, JSON, <<"application/json">>),
@@ -741,6 +744,7 @@ stream_over_http(Node, UUID, File, Method, JObj) ->
             JObj1 = wh_json:set_values([{<<"Media-Transfer-Results">>, MediaTransResults}
                                         ,{<<"Event-Name">>, <<"response">>}
                                         ,{<<"Event-Category">>, <<"call">>}
+                                        ,{<<"Msg-ID">>, wh_util:to_binary(wh_util:current_tstamp())}
                                        ], JObj),
 
             case lists:member(StatusCode, ["200", "201", "202"]) of
@@ -871,8 +875,7 @@ send_fetch_call_event(Node, UUID, JObj) ->
                      ,{<<"Application-Response">>, <<>>}
                      | wh_api:default_headers(<<>>, <<"error">>, wh_util:to_binary(Type), ?APP_NAME, ?APP_VERSION)
                     ],
-            {ok, P2} = wapi_dialplan:error(Error),
-            amqp_util:callevt_publish(UUID, P2, event)
+            wapi_dialplan:publish_error(UUID, Error)
     end.
 
 %%--------------------------------------------------------------------
