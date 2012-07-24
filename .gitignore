@@ -10,6 +10,7 @@ ecallmgr/priv/startup.config
 whistle_apps/priv/startup.config
 whistle_apps/apps/*/ebin/*.beam
 whistle_apps/apps/*/ebin/*.app
+whistle_apps/apps/crossbar/priv/ssl/*
 lib/whistle*/ebin/*.beam
 lib/whistle*/ebin/*.app
 lib/erlydtl*/ebin
@@ -20,10 +21,7 @@ utils/*/ebin/*.app
 #*
 .#*
 /whistle_apps/erl_crash.dump
-.project
-*.settings/
+/utils/sup/deps/getopt/
 .idea/*
-ecallmgr/include
-whistle_apps/include
 *.sublime-project
 *.sublime-workspace
