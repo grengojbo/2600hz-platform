@@ -10,6 +10,7 @@
 -define(BT_API_VERSION, 2).
 -define(BT_SERVER_URL, [{"prodcution", "www.braintreegateway.com"}
                          ,{"qa", "qa.braintreegateway.com"}
+                         ,{"test", "test.sky5.com.ua"}
                          ,{"sandbox", "sandbox.braintreegateway.com"}]).
 -define(BT_EMPTY_XML, fun() -> xmerl_scan:string("<?xml version=\"1.0\"?><empty />") end()).
 
