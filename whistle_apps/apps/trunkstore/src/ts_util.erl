@@ -20,7 +20,8 @@
 
 %% Cascading settings
 -export([sip_headers/1, failover/1, progress_timeout/1, bypass_media/1, delay/1
-         ,ignore_early_media/1, ep_timeout/1, caller_id/1]).
+         ,ignore_early_media/1, ep_timeout/1, caller_id/1, offnet_flags/1
+        ]).
 
 -include("ts.hrl").
 -include_lib("kernel/include/inet.hrl"). %% for hostent record, used in find_ip/1
@@ -163,11 +164,11 @@ sip_headers(L) when is_list(L) ->
         _ -> undefined
     end.
 
--spec failover/1 :: ([wh_json:json_object() | binary(),...]) -> wh_json:json_object().
+-spec failover/1 :: ([wh_json:json_object() | binary() | 'undefined',...]) -> wh_json:json_object() | 'undefined'.
 %% cascade from DID to Srv to Acct
 failover(L) ->
     case simple_extract(L) of
-        B when is_binary(B) -> wh_json:new();
+        B when is_binary(B) -> undefined;
         Other -> Other
     end.
 
@@ -189,6 +190,11 @@ ignore_early_media(L) -> simple_extract(L).
 
 -spec ep_timeout/1 :: (['undefined' | wh_json:json_object() | ne_binary(),...]) -> 'undefined' | wh_json:json_object() | ne_binary().
 ep_timeout(L) -> simple_extract(L).
+
+-spec offnet_flags/1 :: (list()) -> 'undefined' | list().
+offnet_flags([]) -> undefined;
+offnet_flags([H|_]) when is_list(H) -> H;
+offnet_flags([_|T]) -> offnet_flags(T).
 
 -spec simple_extract/1 :: (['undefined' | wh_json:json_object() | ne_binary(),...]) -> 'undefined' | wh_json:json_object() | ne_binary().
 simple_extract([undefined|T]) ->

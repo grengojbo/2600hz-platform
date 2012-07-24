@@ -9,8 +9,12 @@
 -module(whistle_number_manager_maintenance).
 
 -export([reconcile/0, reconcile/1]).
+-export([reconcile_numbers/0, reconcile_numbers/1]).
+-export([reconcile_accounts/0, reconcile_accounts/1]).
 
--include("../include/wh_number_manager.hrl").
+-export([reconcile_providers/0]).
+
+-include("wh_number_manager.hrl").
 -include_lib("whistle/include/wh_databases.hrl").
 
 %% These are temporary until the viewing of numbers in an account can
@@ -30,36 +34,107 @@
 %% exist
 %% @end
 %%--------------------------------------------------------------------
--spec reconcile/0 :: () -> 'done'.
--spec reconcile/1 :: (string() | ne_binary() | 'all') -> 'done'.
-
+-spec reconcile/0 :: () -> 'no_return'.
+-spec reconcile/1 :: (string() | ne_binary() | 'all') -> 'no_return'.
+ 
 reconcile() ->
-    reconcile(all).
+    io:format("This command is depreciated, please use reconcile_numbers() or for older systems reconcile_accounts(). See the wiki for details on the differences.", []),
+    no_return.
 
-reconcile(all) ->
-    reconcile_accounts(),
-    done;
-reconcile(AccountId) when not is_binary(AccountId) ->
-    reconcile(wh_util:to_binary(AccountId));
-reconcile(AccountId) ->
+reconcile(Arg) ->
+    io:format("This command is depreciated, please use reconcile_numbers() or for older systems reconcile_accounts(~s). See the wiki for details on the differences.", [Arg]),
+    no_return.
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
+%% Seach the number databases and ensure all assignments are reflected
+%% in the accounts
+%% @end
+%%--------------------------------------------------------------------
+-spec reconcile_numbers/0 :: () -> 'no_return' | {'error', _}.
+-spec reconcile_numbers/1 :: (string() | ne_binary() | 'all') -> 'no_return' | {'error', _}.
+ 
+reconcile_numbers() ->
+    reconcile_numbers(all).
+
+reconcile_numbers(all) ->
+    _ = [reconcile_numbers(Db) 
+         || Db <- wnm_util:get_all_number_dbs()
+        ],
+    no_return;
+reconcile_numbers(NumberDb) when not is_binary(NumberDb) ->
+    reconcile_numbers(wh_util:to_binary(NumberDb));
+reconcile_numbers(NumberDb) ->
+    Db = wh_util:to_binary(http_uri:encode(wh_util:to_list(NumberDb))),
+    case couch_mgr:all_docs(Db) of
+        {error, _R}=E -> E;
+        {ok, JObjs} ->
+            Numbers = [Number 
+                       || JObj <- JObjs
+                              ,case (Number = wh_json:get_value(<<"id">>, JObj)) of
+                                   <<"_design/", _/binary>> -> false;
+                                   _Else -> true
+                               end
+                      ],
+            _ = reconcile_numbers(Numbers, system),
+            no_return
+    end.
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
+%% Seach the accounts for phone numbers and ensure the number is routed
+%% to the account (first account found with a duplicate number will win)
+%% @end
+%%--------------------------------------------------------------------
+-spec reconcile_accounts/0 :: () -> 'no_return'.
+-spec reconcile_accounts/1 :: (string() | ne_binary() | 'all') -> 'no_return'.
+ 
+reconcile_accounts() ->
+    reconcile_accounts(all).
+
+reconcile_accounts(all) ->
+    _ = [reconcile_accounts(AccountId) || AccountId <- whapps_util:get_all_accounts(raw)],
+    no_return;
+reconcile_accounts(AccountId) when not is_binary(AccountId) ->
+    reconcile_accounts(wh_util:to_binary(AccountId));
+reconcile_accounts(AccountId) ->
     AccountDb = wh_util:format_account_id(AccountId, encoded),
     Numbers = get_callflow_account_numbers(AccountDb),
     Numbers1 = get_trunkstore_account_numbers(AccountId, AccountDb) ++ Numbers,
     _ = reconcile_numbers(Numbers1, wh_util:format_account_id(AccountId, raw)),
-    done.
-
+    no_return.
 
 %%--------------------------------------------------------------------
-%% @private
+%% @public
 %% @doc
-%% Loop over the accounts and try to reconcile the stepswitch routes
-%% with the numbers assigned in the account
+%% Load known provider modules into system_config
+%% exist
 %% @end
 %%--------------------------------------------------------------------
--spec reconcile_accounts/0 :: () -> 'ok'.
-reconcile_accounts() ->
-    _ = [reconcile(AccountId) || AccountId <- whapps_util:get_all_accounts(raw)],
-    ok.
+-spec reconcile_providers/0 :: () -> any().
+-spec reconcile_providers/2 :: ([ne_binary(),...] | [], [ne_binary(),...] | []) -> any().
+reconcile_providers() ->
+    Paths = filelib:wildcard([code:lib_dir(whistle_number_manager), "/src/providers/*.erl"]),
+    Mods = [wh_util:to_binary(filename:rootname(filename:basename(P))) || P <- Paths],
+
+    lager:debug("Mods: ~p", [Mods]),
+
+    Providers = whapps_config:get(?WNM_CONFIG_CAT, <<"providers">>, []),
+    lager:debug("prov: ~p", [Providers]),
+
+    reconcile_providers(Mods, Providers).
+
+reconcile_providers([<<"wnm_", P/binary>>|Avail], Config) ->
+    case lists:member(P, Config) of
+        true -> reconcile_providers(Avail, Config);
+        false -> reconcile_providers(Avail, [P | Config])
+    end;
+reconcile_providers([_|Avail], Config) ->
+    reconcile_providers(Avail, Config);
+reconcile_providers([], Config) ->
+    whapps_config:set_default(?WNM_CONFIG_CAT, <<"providers">>, Config).
 
 %%--------------------------------------------------------------------
 %% @private
@@ -68,7 +143,7 @@ reconcile_accounts() ->
 %% external (TODO: currently just uses US rules).
 %% @end
 %%--------------------------------------------------------------------
--spec get_callflow_account_numbers/1 :: (ne_binary()) -> wh_json:json_object().
+-spec get_callflow_account_numbers/1 :: (ne_binary()) -> wh_json:json_strings().
 get_callflow_account_numbers(AccountId) ->
     AccountDb = wh_util:format_account_id(AccountId, encoded),
     case couch_mgr:get_all_results(AccountDb, ?CALLFLOW_VIEW) of
@@ -148,15 +223,21 @@ get_trunkstore_account_numbers(AccountId) ->
 %% provided numbers
 %% @end
 %%--------------------------------------------------------------------
--spec reconcile_numbers/2 :: ([ne_binary(),...] | [], ne_binary()) -> 'ok'.
-reconcile_numbers([Number|Numbers], AccountId) ->
+-spec reconcile_numbers/2 :: ([ne_binary(),...] | [], 'system' | ne_binary()) -> 'ok'.
+reconcile_numbers(Numbers, AccountId) ->
+    reconcile_numbers(Numbers, AccountId, length(Numbers), 1).
+
+reconcile_numbers([Number|Numbers], AccountId, Total, Count) ->
+    Db = wnm_util:number_to_db_name(Number),
+    ReconcileWith = case is_binary(AccountId) of true -> AccountId; false -> Db end,
     try wh_number_manager:reconcile_number(Number, AccountId, AccountId) of
         _ ->
-            reconcile_numbers(Numbers, AccountId)
+            io:format("reconciled ~s number (~p/~p): ~s~n", [ReconcileWith, Count, Total, Number]),
+            reconcile_numbers(Numbers, AccountId, Total, Count + 1)
     catch
         _E:_R ->
-            lager:debug("error reconciling ~s: ~p:~p", [Number, _E, _R]),
-            reconcile_numbers(Numbers, AccountId)
+            io:format("error reconciling ~s number (~p/~p) ~s: ~p:~p~n", [ReconcileWith, Count, Total, Number, _E, _R]),
+            reconcile_numbers(Numbers, AccountId, Total, Count + 1)
     end;
-reconcile_numbers([], _) ->
+reconcile_numbers([], _, _, _) ->
     ok.

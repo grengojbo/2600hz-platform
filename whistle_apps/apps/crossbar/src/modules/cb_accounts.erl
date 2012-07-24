@@ -17,7 +17,7 @@
          ,resource_exists/0, resource_exists/1, resource_exists/2
          ,validate/1, validate/2, validate/3
          ,put/1, put/2
-         ,post/2, post/3
+         ,post/2
          ,delete/2
         ]).
 -export([create_account/1
@@ -56,59 +56,39 @@ get_realm_from_db(DBName) ->
 -spec ensure_parent_set/0 :: () -> 'ok' | {'error', 'no_accounts' | atom()}.
 ensure_parent_set() ->
     case couch_mgr:get_results(?WH_ACCOUNTS_DB, ?AGG_VIEW_REALM, [{<<"include_docs">>, true}]) of
+        {error, _}=E -> E;
         {ok, []} -> {error, no_accounts};
         {ok, AcctJObjs} ->
-            DefaultParentID = find_default_parent(AcctJObjs),
-
-            _ = [ensure_parent_set(DefaultParentID, wh_json:get_value(<<"doc">>, AcctJObj))
-                 || AcctJObj <- AcctJObjs,
-                    wh_json:get_value(<<"id">>, AcctJObj) =/= DefaultParentID, % not the default parent
-
-                    (Tree = wh_json:get_value([<<"doc">>, <<"pvt_tree">>], AcctJObj)) =:= [] orelse % empty tree (should have at least the parent)
-                        Tree =:= <<>> orelse % Tree is an empty string only
-                        Tree =:= [""] orelse % Tree is bound in the prior bit, and might be a list of an empty string
-                        Tree =:= [<<>>] orelse % Tree is a list of an empty string
-                        Tree =:= undefined % if the pvt_tree key doesn't exist
-                ],
-            ok;
-        {error, _}=E -> E
+            case whapps_util:get_master_account_id() of
+                {error, _}=E -> E;
+                {ok, MasterAccountId} -> 
+                    _ = [ensure_parent_set(MasterAccountId, wh_json:get_value(<<"doc">>, AcctJObj))
+                         || AcctJObj <- AcctJObjs,
+                            wh_json:get_value(<<"id">>, AcctJObj) =/= MasterAccountId, % not the default parent                            
+                            (Tree = wh_json:get_value([<<"doc">>, <<"pvt_tree">>], AcctJObj)) =:= [] orelse % empty tree (should have at least the parent)
+                                Tree =:= <<>> orelse % Tree is an empty string only
+                                Tree =:= [""] orelse % Tree is bound in the prior bit, and might be a list of an empty string
+                                Tree =:= [<<>>] orelse % Tree is a list of an empty string
+                                Tree =:= undefined % if the pvt_tree key doesn't exist
+                        ],
+                    ok
+            end
     end.
 
 -spec ensure_parent_set/2 :: (ne_binary(), wh_json:json_object()) -> 'ok' | #cb_context{}.
 ensure_parent_set(DefaultParentID, JObj) ->
     ParentTree = [DefaultParentID, wh_json:get_value(<<"_id">>, JObj)],
     lager:debug("pvt_tree before: ~p after: ~p", [wh_json:get_value(<<"pvt_tree">>, JObj), ParentTree]),
-
     [JObj1] = update_doc_tree(ParentTree
                               ,wh_json:set_values([{<<"id">>, wh_json:get_value(<<"_id">>, JObj)}
                                                    ,{<<"pvt_tree">>, []}
                                                   ], JObj)
                               ,[]),
-
     case couch_mgr:save_doc(?WH_ACCOUNTS_DB, JObj1) of
         {ok, _} ->
             lager:debug("saved ~s with updated tree", [wh_json:get_value(<<"_id">>, JObj)]);
         {error, _E} ->
             lager:debug("failed to save ~s with updated tree: ~p", [wh_json:get_value(<<"_id">>, JObj), _E])
-    end.
-
--spec find_default_parent/1 :: (wh_json:json_objects()) -> ne_binary().
-find_default_parent(AcctJObjs) ->
-    case whapps_config:get(?ACCOUNTS_CONFIG_CAT, <<"default_parent">>) of
-        undefined ->
-            First = hd(AcctJObjs),
-            {_, OldestAcctID} = lists:foldl(fun(AcctJObj, {Created, _}=Eldest) ->
-                                                    case wh_json:get_integer_value([<<"doc">>, <<"pvt_created">>], AcctJObj) of
-                                                        Older when Older < Created  -> {Older, wh_json:get_value(<<"id">>, AcctJObj)};
-                                                        _ -> Eldest
-                                                    end
-                                            end
-                                            ,{wh_json:get_integer_value([<<"doc">>, <<"pvt_created">>], First), wh_json:get_value(<<"id">>, First)}
-                                            ,AcctJObjs),
-            lager:debug("setting default parent account to ~s", [OldestAcctID]),
-            whapps_config:set(?ACCOUNTS_CONFIG_CAT, <<"default_parent">>, OldestAcctID),
-            OldestAcctID;
-        Default -> Default
     end.
 
 %% Bindings callbacks
@@ -133,11 +113,9 @@ init() ->
 -spec allowed_methods/1 :: (path_token()) -> http_methods().
 -spec allowed_methods/2 :: (path_token(), ne_binary()) -> http_methods().
 allowed_methods() ->
-    ['GET', 'PUT'].
+    ['PUT'].
 allowed_methods(_) ->
     ['GET', 'PUT', 'POST', 'DELETE'].
-allowed_methods(_, <<"parent">>) ->
-    ['GET', 'POST', 'DELETE'];
 allowed_methods(_, Path) ->
     case lists:member(Path, [<<"ancestors">>, <<"children">>, <<"descendants">>, <<"siblings">>]) of
         true -> ['GET'];
@@ -158,7 +136,7 @@ allowed_methods(_, Path) ->
 resource_exists() -> true.
 resource_exists(_) -> true.
 resource_exists(_, Path) ->
-    lists:member(Path, [<<"parent">>, <<"ancestors">>, <<"children">>, <<"descendants">>, <<"siblings">>]).
+    lists:member(Path, [<<"ancestors">>, <<"children">>, <<"descendants">>, <<"siblings">>]).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -188,8 +166,6 @@ validate(Context, Id, Relationship) ->
 -spec validate_req/1 :: (#cb_context{}) -> #cb_context{}.
 -spec validate_req/2 :: (#cb_context{}, path_token()) -> #cb_context{}.
 -spec validate_req/3 :: (#cb_context{}, path_token(), path_token()) -> #cb_context{}.
-validate_req(#cb_context{req_verb = <<"get">>}=Context) ->
-    load_account_summary([], Context);
 validate_req(#cb_context{req_verb = <<"put">>}=Context) ->
     create_account(Context).
 
@@ -202,12 +178,6 @@ validate_req(#cb_context{req_verb = <<"post">>}=Context, AccountId) ->
 validate_req(#cb_context{req_verb = <<"delete">>}=Context, AccountId) ->
     load_account(AccountId, Context).
 
-validate_req(#cb_context{req_verb = <<"get">>}=Context, AccountId, <<"parent">>) ->
-    load_parent(AccountId, Context);
-validate_req(#cb_context{req_verb = <<"post">>}=Context, AccountId, <<"parent">>) ->
-    update_parent(AccountId, Context);
-validate_req(#cb_context{req_verb = <<"delete">>}=Context, AccountId, <<"parent">>) ->
-    load_account(AccountId, Context);
 validate_req(#cb_context{req_verb = <<"get">>}=Context, AccountId, <<"children">>) ->
     load_children(AccountId, Context);
 validate_req(#cb_context{req_verb = <<"get">>}=Context, AccountId, <<"descendants">>) ->
@@ -216,7 +186,6 @@ validate_req(#cb_context{req_verb = <<"get">>}=Context, AccountId, <<"siblings">
     load_siblings(AccountId, Context).
 
 -spec post/2 :: (#cb_context{}, path_token()) -> #cb_context{}.
--spec post/3 :: (#cb_context{}, path_token(), path_token()) -> #cb_context{}.
 post(#cb_context{doc=Doc}=Context, AccountId) ->
     _ = crossbar_util:put_reqid(Context),
     %% this just got messy
@@ -247,13 +216,6 @@ post(#cb_context{doc=Doc}=Context, AccountId) ->
                     Else
             end
     end.
-post(Context, AccountId, <<"parent">>) ->
-    case crossbar_doc:save(Context#cb_context{db_name=wh_util:format_account_id(AccountId, encoded)}) of
-        #cb_context{resp_status=success}=Context1 ->
-            Context1#cb_context{resp_data = wh_json:new()};
-        Else ->
-            Else
-    end.
 
 -spec put/1 :: (#cb_context{}) -> #cb_context{}.
 -spec put/2 :: (#cb_context{}, path_token()) -> #cb_context{}.
@@ -269,17 +231,12 @@ delete(Context, AccountId) ->
     DbName = wh_util:format_account_id(AccountId, encoded),
     try
         ok = wh_number_manager:free_numbers(AccountId),
-
         %% Ensure the DB that we are about to delete is an account
         case couch_mgr:open_doc(DbName, AccountId) of
             {ok, JObj1} ->
                 ?PVT_TYPE = wh_json:get_value(<<"pvt_type">>, JObj1),
                 lager:debug("opened ~s in ~s", [DbName, AccountId]),
-
-                ok = unassign_rep(AccountId, JObj1),
-
                 true = couch_mgr:db_delete(DbName),
-
                 lager:debug("deleted db ~s", [DbName]);
             _ -> ok
         end,
@@ -290,28 +247,13 @@ delete(Context, AccountId) ->
                                                           });
                 _ -> ok
             end,
+        _ = (catch braintree_customer:delete(AccountId)),
         Context
     catch
         _:_E ->
-            lager:debug("Exception while deleting account: ~p", [_E]),
+            lager:debug("exception while deleting account: ~p", [_E]),
             crossbar_util:response_bad_identifier(AccountId, Context)
     end.
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Attempt to load list of accounts, each summarized.  Or a specific
-%% account summary.
-%% @end
-%%--------------------------------------------------------------------
--spec load_account_summary/2 :: (ne_binary() | [], #cb_context{}) -> #cb_context{}.
-load_account_summary([], Context) ->
-    crossbar_doc:load_view(?AGG_VIEW_SUMMARY, [], Context, fun normalize_view_results/2);
-load_account_summary(AccountId, Context) ->
-    crossbar_doc:load_view(?AGG_VIEW_SUMMARY, [
-                                               {<<"startkey">>, [AccountId]}
-                                               ,{<<"endkey">>, [AccountId, wh_json:new()]}
-                                              ], Context, fun normalize_view_results/2).
 
 %%--------------------------------------------------------------------
 %% @private
@@ -322,19 +264,12 @@ load_account_summary(AccountId, Context) ->
 -spec create_account/1 :: (#cb_context{}) -> #cb_context{}.
 -spec create_account/2 :: (#cb_context{}, 'undefined' | ne_binary()) -> #cb_context{}.
 create_account(Context) ->
-    P = case whapps_config:get(?ACCOUNTS_CONFIG_CAT, <<"default_parent">>) of
-            undefined ->
-                case couch_mgr:get_results(?WH_ACCOUNTS_DB, ?AGG_VIEW_SUMMARY, [{<<"include_docs">>, true}]) of
-                    {ok, [_|_]=AcctJObjs} ->
-                        ParentId = find_default_parent(AcctJObjs),
-                        whapps_config:set(?ACCOUNTS_CONFIG_CAT, <<"default_parent">>, ParentId),
-                        ParentId;
-                    _ -> undefined
-                end;
-            ParentId ->
-                ParentId
-        end,
-    create_account(Context, P).
+    case whapps_util:get_master_account_id() of
+        {ok, MasterAccountId} -> create_account(Context, MasterAccountId);
+        {error, _R} ->
+            lager:debug("unabled to determine the system admin account: ~p", [_R]),
+            create_account(Context, undefined)
+    end.
 
 create_account(#cb_context{req_data=ReqData}=Context, ParentId) ->
     Data = case wh_json:get_ne_value(<<"realm">>, ReqData) of
@@ -370,7 +305,23 @@ create_account(#cb_context{req_data=ReqData}=Context, ParentId) ->
 %%--------------------------------------------------------------------
 -spec load_account/2 :: (ne_binary(), #cb_context{}) -> #cb_context{}.
 load_account(AccountId, Context) ->
-    crossbar_doc:load(AccountId, Context).
+    #cb_context{resp_data=RespData, doc=Doc}=Context1=crossbar_doc:load(AccountId, Context),
+    PvtIncludes=[<<"pvt_wnm_allow_additions">>],
+    RespData1 = lists:foldl(fun(<<"pvt_", Key/binary>> = Pvt, Data) ->
+                                    case wh_json:get_ne_value(Pvt, Doc) of
+                                        undefined ->
+                                            wh_json:delete_key(Key, Data);
+                                        Value ->
+                                            wh_json:set_value(Key, Value, Data)
+                                    end;
+                               (_NotPvt, Data) ->
+                                    Data
+                            end
+                            ,RespData
+                            ,PvtIncludes
+                           ),
+    Context1#cb_context{resp_data=RespData1}.
+     
 
 %%--------------------------------------------------------------------
 %% @private
@@ -393,42 +344,6 @@ update_account(AccountId, #cb_context{req_data=Data}=Context) ->
             crossbar_util:response_invalid_data(E, Context);
         {pass, JObj} ->
             crossbar_doc:load_merge(AccountId, JObj, Context)
-    end.
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Attempt to load a summary of the parent of the account
-%% @end
-%%--------------------------------------------------------------------
--spec load_parent/2 :: (ne_binary(), #cb_context{}) -> #cb_context{}.
-load_parent(AccountId, Context) ->
-    case crossbar_doc:load_view(?AGG_VIEW_PARENT, [{<<"startkey">>, AccountId}
-                                                   ,{<<"endkey">>, AccountId}
-                                                  ], Context) of
-        #cb_context{resp_status=success, doc=[JObj|_]} ->
-            Parent = wh_json:get_value([<<"value">>, <<"id">>], JObj),
-            load_account_summary(Parent, Context);
-        _Else ->
-            crossbar_util:response_bad_identifier(AccountId, Context)
-    end.
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Update the tree with a new parent, cascading when necessary, if the
-%% new parent is valid
-%% @end
-%%--------------------------------------------------------------------
--spec update_parent/2 :: (ne_binary(), #cb_context{}) -> #cb_context{}.
-update_parent(AccountId, #cb_context{req_data=Data}=Context) ->
-    case is_valid_parent(Data) of
-        %% {false, Fields} ->
-        %%     crossbar_util:response_invalid_data(Fields, Context);
-        {true, []} ->
-            %% OMGBBQ! NO CHECKS FOR CYCLIC REFERENCES WATCH OUT!
-            ParentId = wh_json:get_value(<<"parent">>, Data),
-            update_tree(AccountId, ParentId, Context)
     end.
 
 %%--------------------------------------------------------------------
@@ -489,46 +404,6 @@ normalize_view_results(JObj, Acc) ->
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec is_valid_parent/1 :: (wh_json:json_object()) -> {'true', []}.
-is_valid_parent(_JObj) ->
-    {true, []}.
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Updates AccountID's parent's tree with the AccountID as a descendant
-%% @end
-%%--------------------------------------------------------------------
--spec update_tree/3 :: (ne_binary(), ne_binary() | 'undefined', #cb_context{}) -> #cb_context{}.
-update_tree(_AccountId, undefined, Context) ->
-    lager:debug("parent ID is undefined"),
-    Context;
-update_tree(AccountId, ParentId, Context) ->
-    case crossbar_doc:load(ParentId, Context) of
-        #cb_context{resp_status=success, doc=Parent} ->
-            lager:debug("loaded parent account: ~s", [ParentId]),
-            case load_descendants(AccountId, Context) of
-                #cb_context{resp_status=success, doc=[]} ->
-                    lager:debug("no descendants loaded for ~s", [AccountId]),
-                    crossbar_util:response_bad_identifier(AccountId, Context);
-                #cb_context{resp_status=success, doc=DescDocs}=Context1 when is_list(DescDocs) ->
-                    lager:debug("descendants found for ~s", [AccountId]),
-                    Tree = wh_json:get_value(<<"pvt_tree">>, Parent, []) ++ [ParentId, AccountId],
-                    Updater = fun(Desc, Acc) -> update_doc_tree(Tree, Desc, Acc) end,
-                    Updates = lists:foldr(Updater, [], DescDocs),
-                    Context1#cb_context{doc=Updates};
-                Context1 -> Context1
-            end;
-        Else ->
-            Else
-    end.
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%%
-%% @end
-%%--------------------------------------------------------------------
 -spec update_doc_tree/3 :: ([ne_binary(),...], wh_json:json_object(), wh_json:json_objects()) -> wh_json:json_objects().
 update_doc_tree([_|_]=ParentTree, JObj, Acc) ->
     AccountId = wh_json:get_value(<<"id">>, JObj),
@@ -561,7 +436,11 @@ update_doc_tree([_|_]=ParentTree, JObj, Acc) ->
 set_private_fields(JObj0, Context, undefined) ->
     lists:foldl(fun(Fun, JObj1) ->
                         Fun(JObj1, Context)
-                end, JObj0, [fun add_pvt_type/2, fun add_pvt_api_key/2, fun add_pvt_tree/2]);
+                end, JObj0, [fun add_pvt_type/2
+                             ,fun add_pvt_api_key/2
+                             ,fun add_pvt_tree/2
+                             ,fun add_pvt_service_plan/2
+                            ]);
 set_private_fields(JObj0, Context, ParentId) ->
     case is_binary(ParentId) andalso couch_mgr:open_doc(wh_util:format_account_id(ParentId, encoded), ParentId) of
         {ok, ParentJObj} ->
@@ -571,7 +450,12 @@ set_private_fields(JObj0, Context, ParentId) ->
             AddPvtEnabled = fun(JObj, _) -> wh_json:set_value(<<"pvt_enabled">>, Enabled, JObj) end,
             lists:foldl(fun(Fun, JObj1) ->
                                 Fun(JObj1, Context)
-                        end, JObj0, [fun add_pvt_type/2, fun add_pvt_api_key/2, AddPvtTree, AddPvtEnabled]);
+                        end, JObj0, [fun add_pvt_type/2
+                                     ,fun add_pvt_api_key/2
+                                     ,AddPvtTree
+                                     ,AddPvtEnabled
+                                     ,fun add_pvt_service_plan/2
+                                    ]);
         false ->
             set_private_fields(JObj0, Context, undefined);
         _ ->
@@ -609,6 +493,16 @@ add_pvt_tree(JObj, #cb_context{auth_doc=Token}) ->
             lager:debug("setting parent tree to [~s]", [AuthAccId]),
             wh_json:set_value(<<"pvt_tree">>, [AuthAccId]
                               ,wh_json:set_value(<<"pvt_enabled">>, false, JObj))
+    end.
+
+
+add_pvt_service_plan(JObj, _) ->
+    case catch wh_reseller:set_service_plans(wh_json:delete_key(<<"service_plan">>, JObj)
+                                             ,wh_json:get_ne_value(<<"service_plan">>, JObj)) of
+        {'EXIT', _E} ->
+            lager:info("failed to set service plans: ~p", [_E]),
+            wh_json:delete_key(<<"service_plan">>, JObj);
+        JObj1 -> JObj1
     end.
 
 %%--------------------------------------------------------------------
@@ -668,10 +562,10 @@ create_new_account_db(#cb_context{doc=Doc}=Context) ->
     end,
     case couch_mgr:db_create(AccountDb) of
         false ->
-            lager:debug("Failed to create database: ~s", [AccountDb]),
+            lager:debug("failed to create database: ~s", [AccountDb]),
             crossbar_util:response_db_fatal(Context);
         true ->
-            lager:debug("Created DB for account id ~s", [AccountId]),
+            lager:debug("created DB for account id ~s", [AccountId]),
             Generators = [fun(J) -> wh_json:set_value(<<"_id">>, AccountId, J) end
                           ,fun(J) -> wh_json:set_value(<<"pvt_account_db">>, AccountDb, J) end
                           ,fun(J) -> wh_json:set_value(<<"pvt_account_id">>, AccountId, J) end
@@ -687,22 +581,10 @@ create_new_account_db(#cb_context{doc=Doc}=Context) ->
                     whapps_maintenance:refresh(AccountDb),
                     _ = crossbar_bindings:map(<<"account.created">>, Context1),
                     _ = couch_mgr:ensure_saved(?WH_ACCOUNTS_DB, JObj),
-                    assign_rep(AccountId, JObj),
-                    Credit = whapps_config:get(<<"crossbar.accounts">>, <<"starting_credit">>, 0.0),
-                    Units = wapi_money:dollars_to_units(wh_util:to_float(Credit)),
-                    lager:debug("Putting ~p units", [Units]),
-                    Transaction = wh_json:from_list([{<<"amount">>, Units}
-                                                     ,{<<"pvt_type">>, <<"credit">>}
-                                                     ,{<<"pvt_description">>, <<"initial account balance">>}
-                                                    ]),
-                    case crossbar_doc:save(Context#cb_context{doc=Transaction, db_name=AccountDb}) of
-                        #cb_context{resp_status=success} -> ok;
-                        #cb_context{resp_error_msg=Err} -> lager:debug("failed to save credit doc: ~p", [Err])
-                    end,
-                    notfy_new_account(Context1),
+                    _ = notfy_new_account(Context1),
                     Context1;
                 Else ->
-                    lager:debug("Other PUT resp: ~s: ~p~n", [Else#cb_context.resp_status, Else#cb_context.doc]),
+                    lager:debug("other PUT resp: ~s: ~p~n", [Else#cb_context.resp_status, Else#cb_context.doc]),
                     Else
             end
     end.
@@ -742,68 +624,6 @@ is_unique_realm(AccountId, Context, Realm) ->
             true;
         _ ->
             is_unique_realm(undefined, Context, Realm)
-    end.
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Attempt to assign to an account rep in the parent account
-%% @end
-%%--------------------------------------------------------------------
--spec assign_rep/2 :: (ne_binary(), wh_json:json_object()) -> ok.
-assign_rep(AccountId, JObj) ->
-    case wh_json:get_value(<<"pvt_tree">>, JObj, []) of
-        [] ->
-            lager:debug("failed to find a pvt_tree for sub account assignment"),
-            ok;
-        Tree ->
-            Parent = lists:last(Tree),
-            ParentDb = wh_util:format_account_id(Parent, encoded),
-            ViewOptions = [{<<"limit">>, 1}
-                           ,{<<"include_docs">>, true}
-                          ],
-            case couch_mgr:get_results(ParentDb, <<"sub_account_reps/count_assignments">>, ViewOptions) of
-                {ok, [Results]} ->
-                    Rep = wh_json:get_value(<<"doc">>, Results),                    
-                    Assignments = wh_json:get_value(<<"pvt_sub_account_assignments">>, Rep, []), 
-                    couch_mgr:save_doc(ParentDb, wh_json:set_value(<<"pvt_sub_account_assignments">>, [AccountId|Assignments], Rep)),
-                    ok;
-                _E ->
-                    lager:debug("failed to find sub account reps: ~p", [_E]),
-                    ok
-            end
-    end.
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Attempt to remove any assignments to an account rep in the parent
-%% account
-%% @end
-%%--------------------------------------------------------------------
--spec unassign_rep/2 :: (ne_binary(), wh_json:json_object()) -> ok.
-unassign_rep(AccountId, JObj) ->
-    case wh_json:get_value(<<"pvt_tree">>, JObj, []) of
-        [] -> ok;
-        Tree ->
-            Parent = lists:last(Tree),
-            ParentDb = wh_util:format_account_id(Parent, encoded),
-            ViewOptions = [{<<"include_docs">>, true}
-                           ,{<<"key">>, AccountId}],
-            case couch_mgr:get_results(ParentDb, <<"sub_account_reps/find_assignments">>, ViewOptions) of
-                {ok, Results} ->
-                    _ = [begin
-                             Rep = wh_json:get_value(<<"doc">>, Result),
-                             Assignments = wh_json:get_value(<<"pvt_sub_account_assignments">>, Rep, []),                          
-                             couch_mgr:save_doc(ParentDb
-                                                ,wh_json:set_value(<<"pvt_sub_account_assignments">>
-                                                                   ,lists:delete(AccountId, Assignments)
-                                                                   ,Rep)
-                                               )
-                         end || Result <- Results],
-                    ok;
-                _E -> ok
-            end
     end.
 
 %%--------------------------------------------------------------------

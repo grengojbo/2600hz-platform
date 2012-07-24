@@ -23,43 +23,44 @@
          ,is_actionable_resp/1
         ]).
 
+%% routing keys to use in the callmgr exchange
+-define(KEY_ROUTE_REQ, <<"route.req">>). %% corresponds to the route_req/1 api call
+
 -define(EVENT_CATEGORY, <<"dialplan">>).
 -define(ROUTE_REQ_EVENT_NAME, <<"route_req">>).
 
 %% Route Requests
--define(ROUTE_REQ_HEADERS, [<<"Msg-ID">>, <<"To">>, <<"From">>, <<"Request">>, <<"Call-ID">>
+-define(ROUTE_REQ_HEADERS, [<<"To">>, <<"From">>, <<"Request">>, <<"Call-ID">>
                                 ,<<"Caller-ID-Name">>, <<"Caller-ID-Number">>
                            ]).
 -define(OPTIONAL_ROUTE_REQ_HEADERS, [<<"Geo-Location">>, <<"Orig-IP">>, <<"Max-Call-Length">>, <<"Media">>
                                          ,<<"Transcode">>, <<"Codecs">>, <<"Custom-Channel-Vars">>
-
-                                         ,<<"Resource-Type">>, <<"Cost-Parameters">>, <<"Switch-Hostname">>
-                                         ,<<"From-Network-Addr">>
+                                         ,<<"Resource-Type">>, <<"Cost-Parameters">>, <<"From-Network-Addr">>
+                                         ,<<"Switch-Hostname">>, <<"Switch-Nodename">>
                                     ]).
 -define(ROUTE_REQ_VALUES, [{<<"Event-Category">>, ?EVENT_CATEGORY}
                            ,{<<"Event-Name">>, ?ROUTE_REQ_EVENT_NAME}
                            ,{<<"Resource-Type">>, [<<"MMS">>, <<"SMS">>, <<"audio">>, <<"video">>, <<"chat">>]}
                            ,{<<"Media">>, [<<"process">>, <<"proxy">>, <<"bypass">>]}
                           ]).
--define(ROUTE_REQ_TYPES, [{<<"Msg-ID">>, fun is_binary/1}
-                          ,{<<"To">>, fun is_binary/1}
+-define(ROUTE_REQ_COST_PARAMS, [<<"Min-Increment-Cost">>, <<"Max-Incremental-Cost">>
+                                    ,<<"Min-Setup-Cost">>, <<"Max-Setup-Cost">>
+                               ]).
+-define(ROUTE_REQ_TYPES, [{<<"To">>, fun is_binary/1}
                           ,{<<"From">>, fun is_binary/1}
                           ,{<<"Request">>, fun is_binary/1}
                           ,{<<"Call-ID">>, fun is_binary/1}
                           ,{<<"Event-Queue">>, fun is_binary/1}
                           ,{<<"Caller-ID-Name">>, fun is_binary/1}
                           ,{<<"Caller-ID-Number">>, fun is_binary/1}
-                          ,{<<"Cost-Parameters">>, fun({struct, L}) when is_list(L) ->
-                                                           lists:all(fun({K, _V}) ->
-                                                                             lists:member(K, ?ROUTE_REQ_COST_PARAMS)
-                                                                     end, L);
-                                                      (_) -> false
+                          ,{<<"Cost-Parameters">>, fun(JObj) ->
+                                                           wh_json:is_json_object(JObj) andalso
+                                                               lists:all(fun({K, _V}) ->
+                                                                                 lists:member(K, ?ROUTE_REQ_COST_PARAMS)
+                                                                         end, wh_json:to_proplist(JObj))
                                                    end}
-                          ,{<<"Custom-Channel-Vars">>, ?IS_JSON_OBJECT}
+                          ,{<<"Custom-Channel-Vars">>, fun wh_json:is_json_object/1}
                          ]).
--define(ROUTE_REQ_COST_PARAMS, [<<"Min-Increment-Cost">>, <<"Max-Incremental-Cost">>
-                                    ,<<"Min-Setup-Cost">>, <<"Max-Setup-Cost">>
-                               ]).
 
 %% Route Responses
 -define(ROUTE_RESP_ROUTE_HEADERS, [<<"Invite-Format">>]).
@@ -79,12 +80,12 @@
                                   ,{<<"Route">>, fun is_binary/1}
                                   ,{<<"To-User">>, fun is_binary/1}
                                   ,{<<"To-Realm">>, fun is_binary/1}
-                                  ,{<<"SIP-Headers">>, ?IS_JSON_OBJECT}
-                                  ,{<<"Custom-Channel-Vars">>, ?IS_JSON_OBJECT}
+                                  ,{<<"SIP-Headers">>, fun wh_json:is_json_object/1}
+                                  ,{<<"Custom-Channel-Vars">>, fun wh_json:is_json_object/1}
                                 ]).
 
 %% Route Responses
--define(ROUTE_RESP_HEADERS, [<<"Msg-ID">>, <<"Method">>]).
+-define(ROUTE_RESP_HEADERS, [<<"Method">>]).
 -define(OPTIONAL_ROUTE_RESP_HEADERS, [<<"Custom-Channel-Vars">>, <<"Routes">>
                                       ,<<"Route-Error-Code">>, <<"Route-Error-Message">>]).
 -define(ROUTE_RESP_VALUES, [{<<"Event-Category">>, ?EVENT_CATEGORY}
@@ -96,7 +97,7 @@
                            ,{<<"Routes">>, fun(L) when is_list(L) -> true;
                                               (_) -> false
                                            end}
-                           ,{<<"Custom-Channel-Vars">>, ?IS_JSON_OBJECT}
+                           ,{<<"Custom-Channel-Vars">>, fun wh_json:is_json_object/1}
                           ]).
 
 %% Route Winner
@@ -107,7 +108,7 @@
                           ]).
 -define(ROUTE_WIN_TYPES, [{<<"Call-ID">>, fun is_binary/1}
                           ,{<<"Control-Queue">>, fun is_binary/1}
-                          ,{<<"Custom-Channel-Vars">>, ?IS_JSON_OBJECT}
+                          ,{<<"Custom-Channel-Vars">>, fun wh_json:is_json_object/1}
                          ]).
 
 %%--------------------------------------------------------------------

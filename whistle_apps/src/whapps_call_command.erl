@@ -11,18 +11,24 @@
 
 -include("./whapps_call_command.hrl").
 
--export([audio_macro/2]).
+-export([presence/2, presence/3]).
+-export([call_status/1, channel_status/1]).
 -export([response/2, response/3, response/4]).
--export([pickup/2, pickup/3, pickup/4
-         ,b_pickup/2, b_pickup/3, b_pickup/4
+
+-export([relay_event/2]).
+
+-export([audio_macro/2]).
+-export([pickup/2, pickup/3, pickup/4, pickup/5
+         ,b_pickup/2, b_pickup/3, b_pickup/4, b_pickup/5
         ]).
 -export([redirect/3]).
 -export([answer/1, hangup/1, hangup/2, set/3, fetch/1, fetch/2]).
 -export([ring/1]).
--export([call_status/1, call_status/2, channel_status/1, channel_status/2]).
+-export([receive_fax/1
+         ,b_receive_fax/1
+        ]).
 -export([bridge/2, bridge/3, bridge/4, bridge/5, bridge/6, bridge/7]).
 -export([hold/1, b_hold/1, b_hold/2]).
--export([presence/2, presence/3]).
 -export([play/2, play/3]).
 -export([prompt/2, prompt/3]).
 
@@ -32,7 +38,9 @@
 
 -export([record/2, record/3, record/4, record/5, record/6]).
 -export([record_call/2, record_call/3, record_call/4, record_call/5]).
--export([store/3, store/4, store/5]).
+-export([store/3, store/4, store/5
+         ,store_fax/2
+        ]).
 -export([tones/2]).
 -export([prompt_and_collect_digit/2]).
 -export([prompt_and_collect_digits/4, prompt_and_collect_digits/5, prompt_and_collect_digits/6,
@@ -49,12 +57,13 @@
 
 -export([b_answer/1, b_hangup/1, b_hangup/2, b_fetch/1, b_fetch/2]).
 -export([b_ring/1]).
--export([b_call_status/1, b_call_status/2, b_channel_status/1, b_channel_status/2]).
 -export([b_bridge/2, b_bridge/3, b_bridge/4, b_bridge/5, b_bridge/6, b_bridge/7]).
 -export([b_play/2, b_play/3]).
 -export([b_prompt/2, b_prompt/3]).
 -export([b_record/2, b_record/3, b_record/4, b_record/5, b_record/6]).
--export([b_store/3, b_store/4, b_store/5]).
+-export([b_store/3, b_store/4, b_store/5
+         ,b_store_fax/2
+        ]).
 -export([b_prompt_and_collect_digit/2]).
 -export([b_prompt_and_collect_digits/4, b_prompt_and_collect_digits/5, b_prompt_and_collect_digits/6,
          b_prompt_and_collect_digits/7, b_prompt_and_collect_digits/8, b_prompt_and_collect_digits/9
@@ -82,17 +91,104 @@
 -export([collect_digits/2, collect_digits/3, collect_digits/4, collect_digits/5, collect_digits/6]).
 -export([send_command/2]).
 
-%%--------------------------------------------------------------------
-%% @pubic
-%% @doc
-%% @end
-%%--------------------------------------------------------------------
 -type audio_macro_prompt() :: {'play', binary()} | {'play', binary(), [binary(),...]} |
                               {'prompt', binary()} | {'prompt', binary(), binary()} |
                               {'say', binary()} | {'say', binary(), binary()} |
                               {'say', binary(), binary(), binary()} | {'say', binary(), binary(), binary(), binary()} |
-                              {'tones', wh_json:json_objects()}.
+                              {'tones', wh_json:json_objects()} |
+                              {'tts', ne_binary()} | {'tts', ne_binary(), ne_binary()} | {'tts', ne_binary(), ne_binary(), ne_binary()}.
 -export_type([audio_macro_prompt/0]).
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
+%% @end
+%%--------------------------------------------------------------------
+-spec presence/2 :: (ne_binary(), ne_binary() | whapps_call:call()) -> 'ok'.
+-spec presence/3 :: (ne_binary(), ne_binary() | whapps_call:call(), ne_binary() | whapps_call:call() | 'undefined') -> 'ok'.
+
+presence(State, PresenceId) when is_binary(PresenceId) ->
+    presence(State, PresenceId, undefined);
+presence(State, Call) ->
+    presence(State, whapps_call:from(Call)).
+
+presence(State, PresenceId, CallId) when is_binary(CallId) orelse CallId =:= 'undefined' ->
+    Command = [{<<"Presence-ID">>, PresenceId}
+               ,{<<"State">>, State}
+               ,{<<"Call-ID">>, CallId}
+               | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
+              ],
+    wapi_notifications:publish_presence_update(Command);
+presence(State, PresenceId, Call) ->
+    presence(State, PresenceId, whapps_call:call_id(Call)).
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
+%% Produces the low level wh_api request to get the call status.
+%% This request will execute immediately
+%% @end
+%%--------------------------------------------------------------------
+-spec call_status/1 :: ('undefined' | ne_binary() | whapps_call:call()) -> whapps_api_std_return().
+call_status(undefined) ->
+    {error, no_call_id};
+call_status(CallId) when is_binary(CallId) ->
+    Command = [{<<"Call-ID">>, CallId}
+               | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
+              ],
+    Resp = wh_amqp_worker:call(whapps_amqp_pool
+                               ,Command
+                               ,fun(C) -> wapi_call:publish_call_status_req(CallId, C) end
+                               ,fun wapi_call:call_status_resp_v/1),
+    case Resp of
+        {error, _}=E -> E;
+        {ok, JObj}=Ok ->
+            case wh_json:get_value(<<"Status">>, JObj) of
+                <<"active">> -> Ok;
+                _Else -> {error, JObj}
+            end
+    end;
+call_status(Call) ->
+    call_status(whapps_call:call_id(Call)).
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
+%% Produces the low level wh_api request to get the channel status.
+%% This request will execute immediately
+%% @end
+%%--------------------------------------------------------------------
+-spec channel_status/1 :: ('undefined' | ne_binary() | whapps_call:call()) -> whapps_api_std_return().
+channel_status(undefined) ->
+    {error, no_channel_id};
+channel_status(ChannelId) when is_binary(ChannelId) ->
+    Command = [{<<"Call-ID">>, ChannelId}
+               | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
+              ],
+    Resp = wh_amqp_worker:call(whapps_amqp_pool
+                               ,Command
+                               ,fun(C) -> wapi_call:publish_channel_status_req(ChannelId, C) end
+                               ,fun wapi_call:channel_status_resp_v/1),
+    case Resp of
+        {error, _}=E -> E;
+        {ok, JObj}=Ok ->
+            case wh_json:get_value(<<"Status">>, JObj) of
+                <<"active">> -> Ok;
+                _Else -> {error, JObj}
+            end
+    end;
+channel_status(Call) ->
+    channel_status(whapps_call:call_id(Call)).
+
+%%--------------------------------------------------------------------
+%% @pubic
+%% @doc How amqp messages are sent to the mailboxes of processes waiting
+%%      for them in the receive blocks below.
+%% @end
+%%--------------------------------------------------------------------
+-spec relay_event/2 :: (pid(), wh_json:json_object()) -> any().
+relay_event(Pid, JObj) ->
+    Pid ! {amqp_msg, JObj}.
 
 -spec audio_macro/2 :: ([audio_macro_prompt(),...], whapps_call:call()) -> ne_binary().
 -spec audio_macro/3 :: ([audio_macro_prompt(),...], whapps_call:call(), wh_json:json_objects()) -> binary().
@@ -131,7 +227,13 @@ audio_macro([{say, Say, Type, Method}|T], Call, Queue) ->
 audio_macro([{say, Say, Type, Method, Language}|T], Call, Queue) ->
     audio_macro(T, Call, [say_command(Say, Type, Method, Language, Call) | Queue]);
 audio_macro([{tones, Tones}|T], Call, Queue) ->
-    audio_macro(T, Call, [tones_command(Tones, Call) | Queue]).
+    audio_macro(T, Call, [tones_command(Tones, Call) | Queue]);
+audio_macro([{tts, Text}|T], Call, Queue) ->
+    audio_macro(T, Call, [tts_command(Text, Call) | Queue]);
+audio_macro([{tts, Text, Voice}|T], Call, Queue) ->
+    audio_macro(T, Call, [tts_command(Text, Voice, Call) | Queue]);
+audio_macro([{tts, Text, Voice, Lang}|T], Call, Queue) ->
+    audio_macro(T, Call, [tts_command(Text, Voice, Lang, Call) | Queue]).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -161,7 +263,8 @@ response(Code, Cause, Media, Call) ->
 %%--------------------------------------------------------------------
 -spec pickup/2 :: (ne_binary(), whapps_call:call()) -> 'ok'.
 -spec pickup/3 :: (ne_binary(), ne_binary(), whapps_call:call()) -> 'ok'.
--spec pickup/4 :: (ne_binary(), ne_binary(), ne_binary(), whapps_call:call()) -> 'ok'.
+-spec pickup/4 :: (ne_binary(), ne_binary(), ne_binary() | boolean(), whapps_call:call()) -> 'ok'.
+-spec pickup/5 :: (ne_binary(), ne_binary(), ne_binary() | boolean(), ne_binary() | boolean(), whapps_call:call()) -> 'ok'.
 pickup(TargetCallId, Call) ->
     Command = [{<<"Application-Name">>, <<"call_pickup">>}
                ,{<<"Target-Call-ID">>, TargetCallId}
@@ -183,9 +286,19 @@ pickup(TargetCallId, Insert, ContinueOnFail, Call) ->
               ],
     send_command(Command, Call).
 
+pickup(TargetCallId, Insert, ContinueOnFail, ContinueOnCancel, Call) ->
+    Command = [{<<"Application-Name">>, <<"call_pickup">>}
+               ,{<<"Target-Call-ID">>, TargetCallId}
+               ,{<<"Insert-At">>, Insert}
+               ,{<<"Continue-On-Fail">>, ContinueOnFail}
+               ,{<<"Continue-On-Cancel">>, ContinueOnCancel}
+              ],
+    send_command(Command, Call).
+
 -spec b_pickup/2 :: (ne_binary(), whapps_call:call()) -> {'ok', wh_json:json_object()}.
 -spec b_pickup/3 :: (ne_binary(), ne_binary(), whapps_call:call()) -> {'ok', wh_json:json_object()}.
--spec b_pickup/4 :: (ne_binary(), ne_binary(), ne_binary(), whapps_call:call()) -> {'ok', wh_json:json_object()}.
+-spec b_pickup/4 :: (ne_binary(), ne_binary(), ne_binary() | boolean(), whapps_call:call()) -> {'ok', wh_json:json_object()}.
+-spec b_pickup/5 :: (ne_binary(), ne_binary(), ne_binary() | boolean(), ne_binary() | boolean(), whapps_call:call()) -> {'ok', wh_json:json_object()}.
 b_pickup(TargetCallId, Call) ->
     pickup(TargetCallId, Call),
     wait_for_channel_unbridge().
@@ -194,6 +307,10 @@ b_pickup(TargetCallId, Insert, Call) ->
     wait_for_channel_unbridge().
 b_pickup(TargetCallId, Insert, ContinueOnFail, Call) ->
     pickup(TargetCallId, Insert, ContinueOnFail, Call),
+    wait_for_channel_unbridge().
+
+b_pickup(TargetCallId, Insert, ContinueOnFail, ContinueOnCancel, Call) ->
+    pickup(TargetCallId, Insert, ContinueOnFail, ContinueOnCancel, Call),
     wait_for_channel_unbridge().
 
 %%--------------------------------------------------------------------
@@ -221,29 +338,6 @@ redirect(Contact, Server, Call) ->
 -spec flush_dtmf/1 :: (whapps_call:call()) -> ne_binary().
 flush_dtmf(Call) ->
     play(<<"silence_stream://50">>, Call).
-
-%%--------------------------------------------------------------------
-%% @public
-%% @doc
-%% @end
-%%--------------------------------------------------------------------
--spec presence/2 :: (ne_binary(), ne_binary() | whapps_call:call()) -> 'ok'.
--spec presence/3 :: (ne_binary(), ne_binary() | whapps_call:call(), ne_binary() | whapps_call:call() | 'undefined') -> 'ok'.
-
-presence(State, PresenceId) when is_binary(PresenceId) ->
-    presence(State, PresenceId, undefined);
-presence(State, Call) ->
-    presence(State, whapps_call:from(Call)).
-
-presence(State, PresenceId, CallId) when is_binary(CallId) orelse CallId =:= 'undefined' ->
-    Command = [{<<"Presence-ID">>, PresenceId}
-               ,{<<"State">>, State}
-               ,{<<"Call-ID">>, CallId}
-               | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
-              ],
-    wapi_notifications:publish_presence_update(Command);
-presence(State, PresenceId, Call) ->
-    presence(State, PresenceId, whapps_call:call_id(Call)).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -324,6 +418,24 @@ b_ring(Call) ->
 %%--------------------------------------------------------------------
 %% @public
 %% @doc
+%% Instructs the switch to expect to receive a fax
+%% @end
+%%--------------------------------------------------------------------
+-spec receive_fax/1 :: (whapps_call:call()) -> 'ok'.
+-spec b_receive_fax/1 :: (whapps_call:call()) -> whapps_api_error() |
+                                                 {'ok', wh_json:json_object()}.
+
+receive_fax(Call) ->
+    Command = [{<<"Application-Name">>, <<"receive_fax">>}],
+    send_command(Command, Call).
+
+b_receive_fax(Call) ->
+    receive_fax(Call),
+    wait_for_fax().
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
 %% Produces the low level wh_api request to answer the channel
 %% @end
 %%--------------------------------------------------------------------
@@ -374,96 +486,6 @@ b_hangup(true, Call) ->
     hangup(true, Call),
     wait_for_unbridge().
 
-
-%%--------------------------------------------------------------------
-%% @public
-%% @doc
-%% Produces the low level wh_api request to get the call status.
-%% This request will execute immediately
-%% @end
-%%--------------------------------------------------------------------
--spec call_status/1 :: (whapps_call:call()) -> 'ok'.
--spec call_status/2 :: ('undefined' | ne_binary(), whapps_call:call()) -> 'ok'.
--spec b_call_status/1 :: (whapps_call:call()) -> whapps_api_std_return().
--spec b_call_status/2 :: ('undefined' | ne_binary(), whapps_call:call()) -> whapps_api_std_return().
-
-
-call_status(Call) ->    
-    call_status(undefined, Call).
-
-call_status(undefined, Call) ->
-    call_status(whapps_call:call_id(Call), Call);
-call_status(CallId, Call) ->
-    Command = [{<<"Call-ID">>, CallId}
-               | wh_api:default_headers(whapps_call:controller_queue(Call), ?APP_NAME, ?APP_VERSION)
-              ],
-    wapi_call:publish_call_status_req(CallId, Command).
-
-b_call_status(Call) ->
-    b_call_status(undefined, Call).
-
-b_call_status(undefined, Call) ->
-    b_call_status(whapps_call:call_id(Call), Call);
-b_call_status(CallId, Call) ->
-    call_status(CallId, Call),
-    wait_for_our_call_status(CallId).
-
-wait_for_our_call_status(CallId) ->
-    case wait_for_message(<<>>, <<"call_status_resp">>, <<"call_event">>, 2000) of
-        {ok, JObj}=Ok ->
-            case wh_json:get_value(<<"Call-ID">>, JObj) of
-                CallId -> Ok;
-                _Else -> wait_for_our_call_status(CallId)
-            end;
-        Else -> Else
-    end.
-
-%%--------------------------------------------------------------------
-%% @public
-%% @doc
-%% Produces the low level wh_api request to get the channel status.
-%% This request will execute immediately
-%% @end
-%%--------------------------------------------------------------------
--spec channel_status/1 :: (whapps_call:call()) -> 'ok'.
--spec channel_status/2 :: (undefined | ne_binary(), whapps_call:call()) -> 'ok'.
--spec b_channel_status/1 :: (whapps_call:call()) -> whapps_api_std_return().
--spec b_channel_status/2 :: (undefined | ne_binary(), whapps_call:call()) -> whapps_api_std_return().
-
-channel_status(Call) ->
-    channel_status(undefined, Call).
-
-channel_status(undefined, Call) ->
-    channel_status(whapps_call:call_id(Call), Call);
-channel_status(CallId, Call) ->
-    Command = [{<<"Call-ID">>, CallId}
-               | wh_api:default_headers(whapps_call:controller_queue(Call), ?APP_NAME, ?APP_VERSION)
-              ],
-    wapi_call:publish_channel_status_req(CallId, Command).
-
-b_channel_status(Call) ->
-    b_channel_status(undefined, Call).
-
-b_channel_status(undefined, Call) ->
-    b_channel_status(whapps_call:call_id(Call), Call);
-b_channel_status(CallId, Call) ->
-    channel_status(CallId, Call),
-    wait_for_our_channel_status(CallId).
-
-wait_for_our_channel_status(CallId) ->
-    case wait_for_message(<<>>, <<"channel_status_resp">>, <<"call_event">>, 2000) of
-        {ok, JObj}=Ok ->
-            case wh_json:get_value(<<"Call-ID">>, JObj) of
-                CallId -> 
-                    case wh_json:get_value(<<"Status">>, JObj) of 
-                        <<"active">> -> Ok;
-                        _Else -> {error, JObj}
-                    end;
-                _Else -> wait_for_our_channel_status(CallId)
-            end;
-        Else -> Else
-    end.
-
 %%--------------------------------------------------------------------
 %% @public
 %% @doc
@@ -489,7 +511,7 @@ wait_for_our_channel_status(CallId) ->
 bridge(Endpoints, Call) ->
     bridge(Endpoints, ?DEFAULT_TIMEOUT, Call).
 bridge(Endpoints, Timeout, Call) ->
-    bridge(Endpoints, Timeout, <<"single">>, Call).
+    bridge(Endpoints, Timeout, wapi_dialplan:dial_method_single(), Call).
 bridge(Endpoints, Timeout, Strategy, Call) ->
     bridge(Endpoints, Timeout, Strategy, <<"false">>, Call).
 bridge(Endpoints, Timeout, Strategy, IgnoreEarlyMedia, Call) ->
@@ -510,7 +532,7 @@ bridge(Endpoints, Timeout, Strategy, IgnoreEarlyMedia, Ringback, SIPHeaders, Cal
 b_bridge(Endpoints, Call) ->
     b_bridge(Endpoints, ?DEFAULT_TIMEOUT, Call).
 b_bridge(Endpoints, Timeout, Call) ->
-    b_bridge(Endpoints, Timeout, <<"single">>, Call).
+    b_bridge(Endpoints, Timeout, wapi_dialplan:dial_method_single(), Call).
 b_bridge(Endpoints, Timeout, Strategy, Call) ->
     b_bridge(Endpoints, Timeout, Strategy, <<"false">>, Call).
 b_bridge(Endpoints, Timeout, Strategy, IgnoreEarlyMedia, Call) ->
@@ -593,17 +615,15 @@ play(Media, Call) ->
 play(Media, Terminators, Call) ->
     NoopId = couch_mgr:get_uuid(),
     CallId = whapps_call:call_id(Call),
-    Q = whapps_call:controller_queue(Call),
+
     Commands = [wh_json:from_list([{<<"Application-Name">>, <<"noop">>}
                                    ,{<<"Call-ID">>, CallId}
                                    ,{<<"Msg-ID">>, NoopId}
-                                   | wh_api:default_headers(Q, <<"call">>, <<"command">>, ?APP_NAME, ?APP_VERSION)
                                   ])
                 ,wh_json:from_list([{<<"Application-Name">>, <<"play">>}
                                     ,{<<"Media-Name">>, Media}
                                     ,{<<"Terminators">>, Terminators}
                                     ,{<<"Call-ID">>, CallId}
-                                    | wh_api:default_headers(Q, <<"call">>, <<"command">>, ?APP_NAME, ?APP_VERSION)
                                    ])
                ],
     Command = [{<<"Application-Name">>, <<"queue">>}
@@ -648,21 +668,12 @@ tts(SayMe, Voice, Lang, Call) ->
 
 tts(SayMe, Voice, Lang, Terminators, Call) ->
     NoopId = couch_mgr:get_uuid(),
-    CallId = whapps_call:call_id(Call),
-    Q = whapps_call:controller_queue(Call),
+
     Commands = [wh_json:from_list([{<<"Application-Name">>, <<"noop">>}
-                                   ,{<<"Call-ID">>, CallId}
+                                   ,{<<"Call-ID">>, whapps_call:call_id(Call)}
                                    ,{<<"Msg-ID">>, NoopId}
-                                   | wh_api:default_headers(Q, <<"call">>, <<"command">>, ?APP_NAME, ?APP_VERSION)
                                   ])
-                ,wh_json:from_list([{<<"Application-Name">>, <<"play">>}
-                                    ,{<<"Media-Name">>, list_to_binary([<<"tts://">>, SayMe])}
-                                    ,{<<"Terminators">>, Terminators}
-                                    ,{<<"Voice">>, Voice}
-                                    ,{<<"Language">>, Lang}
-                                    ,{<<"Call-ID">>, CallId}
-                                    | wh_api:default_headers(Q, <<"call">>, <<"command">>, ?APP_NAME, ?APP_VERSION)
-                                   ])
+                ,tts_command(SayMe, Voice, Lang, Terminators, Call)
                ],
     Command = [{<<"Application-Name">>, <<"queue">>}
                ,{<<"Commands">>, Commands}
@@ -670,10 +681,29 @@ tts(SayMe, Voice, Lang, Terminators, Call) ->
     send_command(Command, Call),
     NoopId.
 
--spec b_tts/2 :: (ne_binary(), whapps_call:call()) -> ne_binary().
--spec b_tts/3 :: (ne_binary(), ne_binary(), whapps_call:call()) -> ne_binary().
--spec b_tts/4 :: (ne_binary(), ne_binary(), ne_binary(), whapps_call:call()) -> ne_binary().
--spec b_tts/5 :: (ne_binary(), ne_binary(), ne_binary(), [ne_binary(),...], whapps_call:call()) -> ne_binary().
+-spec tts_command/2 :: (ne_binary(), whapps_call:call()) -> wh_json:json_object().
+-spec tts_command/3 :: (ne_binary(), ne_binary(), whapps_call:call()) -> wh_json:json_object().
+-spec tts_command/4 :: (ne_binary(), ne_binary(), ne_binary(), whapps_call:call()) -> wh_json:json_object().
+-spec tts_command/5 :: (ne_binary(), ne_binary(), ne_binary(), list(), whapps_call:call()) -> wh_json:json_object().
+tts_command(SayMe, Call) ->
+    tts_command(SayMe, <<"female">>, Call).
+tts_command(SayMe, Voice, Call) ->
+    tts_command(SayMe, Voice, <<"en-US">>, Call).
+tts_command(SayMe, Voice, Lang, Call) ->
+    tts_command(SayMe, Voice, Lang, ?ANY_DIGIT, Call).
+tts_command(SayMe, Voice, Lang, Terminators, Call) ->
+    wh_json:from_list([{<<"Application-Name">>, <<"play">>}
+                       ,{<<"Media-Name">>, list_to_binary([<<"tts://">>, SayMe])}
+                       ,{<<"Terminators">>, Terminators}
+                       ,{<<"Voice">>, Voice}
+                       ,{<<"Language">>, Lang}
+                       ,{<<"Call-ID">>, whapps_call:call_id(Call)}
+                      ]).
+
+-spec b_tts/2 :: (ne_binary(), whapps_call:call()) -> whapps_api_std_return().
+-spec b_tts/3 :: (ne_binary(), ne_binary(), whapps_call:call()) -> whapps_api_std_return().
+-spec b_tts/4 :: (ne_binary(), ne_binary(), ne_binary(), whapps_call:call()) -> whapps_api_std_return().
+-spec b_tts/5 :: (ne_binary(), ne_binary(), ne_binary(), [ne_binary(),...], whapps_call:call()) -> whapps_api_std_return().
 
 b_tts(SayMe, Call) ->
     NoopId = tts(SayMe, Call),
@@ -793,6 +823,27 @@ b_store(MediaName, Transfer, Method, Headers, Call) ->
 %%--------------------------------------------------------------------
 %% @public
 %% @doc
+%% Produces the low level wh_api request to store a fax document
+%% caller
+%% @end
+%%--------------------------------------------------------------------
+-spec store_fax/2 :: (ne_binary(), whapps_call:call()) -> 'ok'.
+store_fax(URL, Call) ->
+    Command = [{<<"Application-Name">>, <<"store_fax">>}
+               ,{<<"Media-Transfer-Method">>, <<"put">>}
+               ,{<<"Media-Transfer-Destination">>, URL}
+               ,{<<"Insert-At">>, <<"now">>}
+              ],
+    send_command(Command, Call).
+
+-spec b_store_fax/2 :: (ne_binary(), whapps_call:call()) -> b_store_return().
+b_store_fax(URL, Call) ->
+    store_fax(URL, Call),
+    wait_for_headless_application(<<"store_fax">>).
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
 %% Produces the low level wh_api request to play tones to the
 %% caller
 %% @end
@@ -894,7 +945,7 @@ b_prompt_and_collect_digits(MinDigits, MaxDigits, Prompt, Tries, Timeout, Invali
 -spec play_and_collect_digits/6 :: (ne_binary(), ne_binary(), ne_binary(), ne_binary(), ne_binary(), whapps_call:call()) -> 'ok'.
 -spec play_and_collect_digits/7 :: (ne_binary(), ne_binary(), ne_binary(), ne_binary(), ne_binary(), whapps_api_binary(), whapps_call:call()) -> 'ok'.
 -spec play_and_collect_digits/8 :: (ne_binary(), ne_binary(), ne_binary(), ne_binary(), ne_binary(), whapps_api_binary(), ne_binary()
-                                    ,whapps_call:call()) -> ok.
+                                    ,whapps_call:call()) -> 'ok'.
 -spec play_and_collect_digits/9 :: (ne_binary(), ne_binary(), ne_binary(), ne_binary(), ne_binary(), whapps_api_binary(), ne_binary()
                                     ,[ne_binary(),...], whapps_call:call()) -> 'ok'.
 
@@ -946,7 +997,7 @@ b_play_and_collect_digits(MinDigits, MaxDigits, Media, Tries, Call) ->
 b_play_and_collect_digits(MinDigits, MaxDigits, Media, Tries, Timeout, Call) ->
     b_play_and_collect_digits(MinDigits, MaxDigits, Media, Tries, Timeout, undefined, Call).
 b_play_and_collect_digits(MinDigits, MaxDigits, Media, Tries, Timeout, MediaInvalid, Call) ->
-    b_play_and_collect_digits(MinDigits, MaxDigits, Media, Tries, Timeout, MediaInvalid, <<"\\d+">>, Call).
+    b_play_and_collect_digits(MinDigits, MaxDigits, Media, Tries, Timeout, MediaInvalid, <<"[\\d\\*\\#]+">>, Call).
 b_play_and_collect_digits(MinDigits, MaxDigits, Media, Tries, Timeout, MediaInvalid, Regex, Call) ->
     b_play_and_collect_digits(MinDigits, MaxDigits, Media, Tries, Timeout, MediaInvalid, Regex, ?ANY_DIGIT, Call).
 
@@ -961,7 +1012,7 @@ b_play_and_collect_digits(MinDigits, MaxDigits, Media, Tries, Timeout, MediaInva
         {ok, Digits} ->
             MinSize = wh_util:to_integer(MinDigits),
             case re:run(Digits, Regex) of
-                {match, _} when size(Digits) >= MinSize ->
+                {match, _} when byte_size(Digits) >= MinSize ->
                     {ok, Digits};
                 _ ->
                     RemainingTries = wh_util:to_binary(wh_util:to_integer(Tries) - 1),
@@ -1158,7 +1209,7 @@ collect_digits(MaxDigits, Timeout, Interdigit, NoopId, Terminators, Call) ->
 collect_digits(MaxDigits, Timeout, Interdigit, NoopId, Terminators, Call, Digits, After) ->
     Start = erlang:now(),
     receive
-        {amqp_msg, {struct, _}=JObj} ->
+        {amqp_msg, JObj} ->
             case get_event_type(JObj) of
                 { <<"call_event">>, <<"CHANNEL_UNBRIDGE">>, _ } ->
                     lager:debug("channel was unbridged while collecting digits"),
@@ -1197,6 +1248,7 @@ collect_digits(MaxDigits, Timeout, Interdigit, NoopId, Terminators, Call, Digits
                 { <<"call_event">>, <<"DTMF">>, _ } ->
                     %% remove any queued prompts, and start collecting digits
                     Digits =:= <<>> andalso flush(Call),
+
                     %% DTMF received, collect and start interdigit timeout
                     Digit = wh_json:get_value(<<"DTMF-Digit">>, JObj, <<>>),
                     case lists:member(Digit, Terminators) of
@@ -1215,16 +1267,14 @@ collect_digits(MaxDigits, Timeout, Interdigit, NoopId, Terminators, Call, Digits
                 _ when After =:= infinity ->
                     collect_digits(MaxDigits, Timeout, Interdigit, NoopId, Terminators, Call, Digits, After);
                 _ ->
-                    DiffMicro = timer:now_diff(erlang:now(), Start),
-                    collect_digits(MaxDigits, Timeout, Interdigit, NoopId, Terminators, Call, Digits, After - (DiffMicro div 1000))
+                    collect_digits(MaxDigits, Timeout, Interdigit, NoopId, Terminators, Call, Digits, After - wh_util:elapsed_ms(Start))
             end;
         _ when After =:= infinity ->
             collect_digits(MaxDigits, Timeout, Interdigit, NoopId, Terminators, Call, Digits, After);
         _ ->
             %% dont let the mailbox grow unbounded if
             %%   this process hangs around...
-            DiffMicro = timer:now_diff(erlang:now(), Start),
-            collect_digits(MaxDigits, Timeout, Interdigit, NoopId, Terminators, Call, Digits, After - (DiffMicro div 1000))
+            collect_digits(MaxDigits, Timeout, Interdigit, NoopId, Terminators, Call, Digits, After - wh_util:elapsed_ms(Start))
     after
         After ->
             lager:debug("collect digits timeout"),
@@ -1270,14 +1320,12 @@ wait_for_message(Application, Event, Type, Timeout) ->
                 _ when Timeout =:= infinity ->
                     wait_for_message(Application, Event, Type, Timeout);
                 _ ->
-                    DiffMicro = timer:now_diff(erlang:now(), Start),
-                    wait_for_message(Application, Event, Type, Timeout - (DiffMicro div 1000))
+                    wait_for_message(Application, Event, Type, Timeout - wh_util:elapsed_ms(Start))
             end;
         _ when Timeout =:= infinity ->
             wait_for_message(Application, Event, Type, Timeout);
         _ ->
-            DiffMicro = timer:now_diff(erlang:now(), Start),
-            wait_for_message(Application, Event, Type, Timeout - (DiffMicro div 1000))
+            wait_for_message(Application, Event, Type, Timeout - wh_util:elapsed_ms(Start))
     after
         Timeout ->
             {error, timeout}
@@ -1306,7 +1354,7 @@ wait_for_application(Application, Event, Type) ->
 wait_for_application(Application, Event, Type, Timeout) ->
     Start = erlang:now(),
     receive
-        {amqp_msg, {struct, _}=JObj} ->
+        {amqp_msg, JObj} ->
             case get_event_type(JObj) of
                 { <<"error">>, _, Application } ->
                     lager:debug("channel execution error while waiting for ~s: ~s", [Application, wh_json:encode(JObj)]),
@@ -1319,14 +1367,12 @@ wait_for_application(Application, Event, Type, Timeout) ->
                 _ when Timeout =:= infinity ->
                     wait_for_application(Application, Event, Type, Timeout);
                 _ ->
-                    DiffMicro = timer:now_diff(erlang:now(), Start),
-                    wait_for_application(Application, Event, Type, Timeout - (DiffMicro div 1000))
+                    wait_for_application(Application, Event, Type, Timeout - wh_util:elapsed_ms(Start))
             end;
         _ when Timeout =:= infinity ->
             wait_for_application(Application, Event, Type, Timeout);
         _ ->
-            DiffMicro = timer:now_diff(erlang:now(), Start),
-            wait_for_application(Application, Event, Type, Timeout - (DiffMicro div 1000))
+            wait_for_application(Application, Event, Type, Timeout - wh_util:elapsed_ms(Start))
     after
         Timeout ->
             {error, timeout}
@@ -1356,7 +1402,7 @@ wait_for_headless_application(Application, Event, Type) ->
 wait_for_headless_application(Application, Event, Type, Timeout) ->
     Start = erlang:now(),
     receive
-        {amqp_msg, {struct, _}=JObj} ->
+        {amqp_msg, JObj} ->
             case get_event_type(JObj) of
                 { <<"error">>, _, Application } ->
                     lager:debug("channel execution error while waiting for ~s: ~s", [Application, wh_json:encode(JObj)]),
@@ -1366,14 +1412,12 @@ wait_for_headless_application(Application, Event, Type, Timeout) ->
                 _ when Timeout =:= infinity ->
                     wait_for_headless_application(Application, Event, Type, Timeout);
                 _ ->
-                    DiffMicro = timer:now_diff(erlang:now(), Start),
-                    wait_for_headless_application(Application, Event, Type, Timeout - (DiffMicro div 1000))
+                    wait_for_headless_application(Application, Event, Type, Timeout - wh_util:elapsed_ms(Start))
             end;
         _ when Timeout =:= infinity ->
             wait_for_headless_application(Application, Event, Type, Timeout);
         _ ->
-            DiffMicro = timer:now_diff(erlang:now(), Start),
-            wait_for_headless_application(Application, Event, Type, Timeout - (DiffMicro div 1000))
+            wait_for_headless_application(Application, Event, Type, Timeout - wh_util:elapsed_ms(Start))
     after
         Timeout ->
             {error, timeout}
@@ -1387,11 +1431,9 @@ wait_for_headless_application(Application, Event, Type, Timeout) ->
 %%--------------------------------------------------------------------
 -spec wait_for_dtmf/1 :: ('infinity' | pos_integer()) -> {'error', 'channel_hungup' | wh_json:json_object()} | {'ok', binary()}.
 wait_for_dtmf(Timeout) ->
-    lager:debug("waiting ~p for DTMF", [Timeout]),
-
     Start = erlang:now(),
     receive
-        {amqp_msg, {struct, _}=JObj} ->
+        {amqp_msg, JObj} ->
             case whapps_util:get_event_type(JObj) of
                 { <<"call_event">>, <<"CHANNEL_DESTROY">> } ->
                     lager:debug("channel was destroyed while waiting for DTMF"),
@@ -1407,9 +1449,7 @@ wait_for_dtmf(Timeout) ->
                 _ when Timeout =:= infinity ->
                     wait_for_dtmf(Timeout);
                 _ ->
-                    DiffMicro = timer:now_diff(erlang:now(), Start),
-                    lager:debug("ignoring amqp jobj"),
-                    wait_for_dtmf(Timeout - (DiffMicro div 1000))
+                    wait_for_dtmf(Timeout - wh_util:elapsed_ms(Start))
             end;
         _E when Timeout =:= infinity ->
             lager:debug("unexpected ~p", [_E]),
@@ -1418,8 +1458,7 @@ wait_for_dtmf(Timeout) ->
             lager:debug("unexpected ~p", [_E]),
             %% dont let the mailbox grow unbounded if
             %%   this process hangs around...
-            DiffMicro = timer:now_diff(erlang:now(), Start),
-            wait_for_dtmf(Timeout - (DiffMicro div 1000))
+            wait_for_dtmf(Timeout - wh_util:elapsed_ms(Start))
     after
         Timeout ->
             {ok, <<>>}
@@ -1440,7 +1479,7 @@ wait_for_bridge(Timeout, Call) ->
 wait_for_bridge(Timeout, Fun, Call) ->
     Start = erlang:now(),
     receive
-        {amqp_msg, {struct, _}=JObj} ->
+        {amqp_msg, JObj} ->
             AppResponse = wh_json:get_value(<<"Application-Response">>, JObj,
                                             wh_json:get_value(<<"Hangup-Cause">>, JObj)),
             Result = case lists:member(AppResponse, ?SUCCESSFUL_HANGUPS) of
@@ -1467,16 +1506,14 @@ wait_for_bridge(Timeout, Fun, Call) ->
                 _ when Timeout =:= infinity ->
                     wait_for_bridge(Timeout, Fun, Call);
                 _ ->
-                    DiffMicro = timer:now_diff(erlang:now(), Start),
-                    wait_for_bridge(Timeout - (DiffMicro div 1000), Fun, Call)
+                    wait_for_bridge(Timeout - wh_util:elapsed_ms(Start), Fun, Call)
             end;
         _ when Timeout =:= infinity ->
             wait_for_bridge(Timeout, Fun, Call);
         _ ->
             %% dont let the mailbox grow unbounded if
             %%   this process hangs around...
-            DiffMicro = timer:now_diff(erlang:now(), Start),
-            wait_for_bridge(Timeout - (DiffMicro div 1000), Fun, Call)
+            wait_for_bridge(Timeout - wh_util:elapsed_ms(Start), Fun, Call)
     after
         Timeout ->
             {error, timeout}
@@ -1512,7 +1549,7 @@ wait_for_noop(NoopId) ->
 -spec wait_for_channel_unbridge/0 :: () -> {'ok', wh_json:json_object()}.
 wait_for_channel_unbridge() ->
     receive
-        {amqp_msg, {struct, _}=JObj} ->
+        {amqp_msg, JObj} ->
             case whapps_util:get_event_type(JObj) of
                 { <<"call_event">>, <<"CHANNEL_UNBRIDGE">> } ->
                     {ok, JObj};
@@ -1536,7 +1573,7 @@ wait_for_channel_unbridge() ->
 -spec wait_for_channel_bridge/0 :: () -> {'ok', wh_json:json_object()}.
 wait_for_channel_bridge() ->
     receive
-        {amqp_msg, {struct, _}=JObj} ->
+        {amqp_msg, JObj} ->
             case whapps_util:get_event_type(JObj) of
                 { <<"call_event">>, <<"CHANNEL_BRIDGE">> } ->
                     {ok, JObj};
@@ -1560,7 +1597,7 @@ wait_for_channel_bridge() ->
 -spec wait_for_hangup/0 :: () -> {'ok', 'channel_hungup'}.
 wait_for_hangup() ->
     receive
-        {amqp_msg, {struct, _}=JObj} ->
+        {amqp_msg, JObj} ->
             case whapps_util:get_event_type(JObj) of
                 { <<"call_event">>, <<"CHANNEL_HANGUP">> } ->
                     {ok, channel_hungup};
@@ -1582,7 +1619,7 @@ wait_for_hangup() ->
 -spec wait_for_unbridge/0 :: () -> {'ok', 'leg_hungup'}.
 wait_for_unbridge() ->
     receive
-        {amqp_msg, {struct, _}=JObj} ->
+        {amqp_msg, JObj} ->
             case whapps_util:get_event_type(JObj) of
                 { <<"call_event">>, <<"LEG_DESTROYED">> } ->
                     {ok, leg_hungup};
@@ -1601,11 +1638,12 @@ wait_for_unbridge() ->
 %% Waits for and determines the status of the bridge command
 %% @end
 %%--------------------------------------------------------------------
--spec wait_for_application_or_dtmf/2 :: (ne_binary(), 'infinity' | pos_integer()) -> whapps_api_std_return() | {'dtmf', binary()}.
+-spec wait_for_application_or_dtmf/2 :: (ne_binary(), 'infinity' | pos_integer()) -> whapps_api_std_return() |
+                                                                                     {'dtmf', binary()}.
 wait_for_application_or_dtmf(Application, Timeout) ->
     Start = erlang:now(),
     receive
-        {amqp_msg, {struct, _}=JObj} ->
+        {amqp_msg, JObj} ->
             case get_event_type(JObj) of
                 { <<"call_event">>, <<"CHANNEL_DESTROY">>, _ } ->
                     lager:debug("channel was destroyed while waiting for ~s or DTMF", [Application]),
@@ -1623,20 +1661,60 @@ wait_for_application_or_dtmf(Application, Timeout) ->
                 _ when Timeout =:= infinity ->
                     wait_for_application_or_dtmf(Application, Timeout);
                 _ ->
-                    DiffMicro = timer:now_diff(erlang:now(), Start),
-                    wait_for_application_or_dtmf(Application, Timeout - (DiffMicro div 1000))
+                    wait_for_application_or_dtmf(Application, Timeout - wh_util:elapsed_ms(Start))
             end;
         _ when Timeout =:= infinity ->
             wait_for_application_or_dtmf(Application, Timeout);
         _ ->
             %% dont let the mailbox grow unbounded if
             %%   this process hangs around...
-            DiffMicro = timer:now_diff(erlang:now(), Start),
-            wait_for_application_or_dtmf(Application, Timeout - (DiffMicro div 1000))
+            wait_for_application_or_dtmf(Application, Timeout - wh_util:elapsed_ms(Start))
     after
         Timeout ->
             {error, timeout}
     end.
+
+-type wait_for_fax_ret() :: {'ok' | 'failed', wh_json:json_object()} |
+                            {'error', 'channel_destroy' | 'channel_hungup' | wh_json:json_object()}.
+-spec wait_for_fax/0 :: () -> wait_for_fax_ret().
+-spec wait_for_fax/1 :: (integer() | 'infinity') -> wait_for_fax_ret().
+wait_for_fax() ->
+    wait_for_fax(5000).
+wait_for_fax(Timeout) ->
+    Start = erlang:now(),
+    receive
+        {amqp_msg, JObj} ->
+            case get_event_type(JObj) of
+                { <<"call_event">>, <<"CHANNEL_DESTROY">>, _ } ->
+                    lager:debug("channel was destroyed while waiting for fax"),
+                    {error, channel_destroy};
+                { <<"call_event">>, <<"CHANNEL_HANGUP">>, _ } ->
+                    lager:debug("channel was hungup while waiting for fax"),
+                    {error, channel_hungup};
+                { <<"error">>, _, <<"receive_fax">> } ->
+                    lager:debug("channel execution error while waiting for fax: ~s", [wh_json:encode(JObj)]),
+                    {error, JObj};
+                { <<"call_event">>, <<"CHANNEL_EXECUTE">>, <<"receive_fax">> } ->
+                    wait_for_fax(infinity);
+                { <<"call_event">>, <<"CHANNEL_EXECUTE_COMPLETE">>, <<"receive_fax">> } ->
+                    case wh_json:is_true(<<"Fax-Success">>, JObj, false) of
+                        true -> {ok, JObj};
+                        false -> {failed, JObj}
+                    end;
+                _ when Timeout =:= infinity ->
+                    wait_for_fax(Timeout);
+                _ ->
+                    wait_for_fax(Timeout - wh_util:elapsed_ms(Start))
+            end;
+        _ when Timeout =:= infinity ->
+            wait_for_fax(Timeout);
+        _ ->
+            wait_for_fax(Timeout - wh_util:elapsed_ms(Start))
+    after
+        Timeout ->
+            {error, timeout}
+    end.
+
 
 %%--------------------------------------------------------------------
 %% @public

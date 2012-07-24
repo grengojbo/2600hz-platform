@@ -23,6 +23,7 @@
 -define(SERVER, ?MODULE).
 
 -define(RESPONDERS, [{notify_vm, [{<<"notification">>, <<"new_voicemail">>}]}
+                     ,{notify_fax, [{<<"notification">>, <<"new_fax">>}]}
                      ,{notify_deregister, [{<<"notification">>, <<"deregister">>}]}
                      ,{notify_pwd_recovery, [{<<"notification">>, <<"password_recovery">>}]}
                      ,{notify_new_account, [{<<"notification">>, <<"new_account">>}]}
@@ -30,6 +31,7 @@
                      ,{notify_port_request, [{<<"notification">>, <<"port_request">>}]}
                      ,{notify_first_occurrence, [{<<"directory">>, <<"reg_query_resp">>}]}
                      ,{notify_low_balance, [{<<"notification">>, <<"low_balance">>}]}
+                     ,{notify_transaction, [{<<"notification">>, <<"transaction">>}]}
                      ,{notify_system_alert, [{<<"notification">>, <<"system_alert">>}]}
                     ]).
 -define(BINDINGS, [{notifications, []}
@@ -79,6 +81,7 @@ stop(Srv) ->
 %% @end
 %%--------------------------------------------------------------------
 init([]) ->
+    put(callid, ?LOG_SYSTEM_ID),
     lager:debug("starting new vm notify process"),
     {ok, #state{}}.
 
@@ -123,7 +126,7 @@ handle_cast(_Msg, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_info(_Info, State) ->
-    lager:debug("Unhandled message: ~p", [_Info]),
+    lager:debug("unhandled message: ~p", [_Info]),
     {noreply, State}.
 
 %%--------------------------------------------------------------------
@@ -149,8 +152,7 @@ handle_event(_JObj, _State) ->
 %% @end
 %%--------------------------------------------------------------------
 terminate(_Reason, _State) ->
-    lager:debug("vm notify process ~p termination", [_Reason]),
-    ok.
+    lager:debug("vm notify process ~p termination", [_Reason]).
 
 %%--------------------------------------------------------------------
 %% @private

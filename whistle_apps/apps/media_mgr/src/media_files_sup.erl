@@ -40,30 +40,40 @@ start_link() ->
 
 find_file_server(Id, Doc, Attachment) ->
     Name = [Id,Doc,Attachment],
-    case [P||{N,P,_,_} <- supervisor:which_children(?MODULE), N =:= Name] of
+    case [P||{N,P,_,_} <- supervisor:which_children(?MODULE), N =:= Name, is_pid(P)] of
         [] -> {error, no_file_server};
         [P] -> {ok, P}
     end.
 
 find_file_server(Id, Doc, Attachment, Meta) ->
     Name = [Id,Doc,Attachment],
+    find_file_server(Id, Doc, Attachment, Meta, Name).
+find_file_server(Id, Doc, Attachment, Meta, Name) ->
     case supervisor:start_child(?MODULE, ?CHILD(Name, Id, Doc, Attachment, Meta)) of
         {ok, _Pid}=OK -> OK;
         {error, {already_started, Pid}} -> {ok, Pid};
+        {error, already_present} ->
+            _ = supervisor:delete_child(?MODULE, Name),
+            find_file_server(Id, Doc, Attachment, Meta, Name);
         {error, _}=E -> E
     end.
 
 find_tts_server(Id) ->
-    case [P||{N,P,_,_} <- supervisor:which_children(?MODULE), N =:= Id] of
+    case [P||{N,P,_,_} <- supervisor:which_children(?MODULE), N =:= Id, is_pid(P)] of
         [] -> {error, no_file_server};
         [P] -> {ok, P}
     end.
 
 find_tts_server(Text, JObj) ->
     Id = list_to_binary([wh_util:to_hex_binary(Text), $., wh_json:get_value(<<"Format">>, JObj, <<"wav">>)]),
+    find_tts_server(Text, JObj, Id).
+find_tts_server(Text, JObj, Id) ->
     case supervisor:start_child(?MODULE, ?CHILD(Id, Text, JObj)) of
         {ok, _Pid}=OK -> OK;
         {error, {already_started, Pid}} -> {ok, Pid};
+        {error, already_present} ->
+            _ = supervisor:delete_child(?MODULE, Id),
+            find_tts_server(Text, JObj, Id);
         {error, _}=E -> E
     end.
 

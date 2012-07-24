@@ -27,7 +27,7 @@
                                                    ,<<"Emergency-Caller-ID-Name">>, <<"Emergency-Caller-ID-Number">>
                                                    ,<<"Ringback">>, <<"SIP-Headers">>, <<"Custom-Channel-Vars">>
                                                    ,<<"Hold-Media">>, <<"Presence-ID">>, <<"Account-Realm">>
-                                                   ,<<"Control-Queue">>, <<"Call-ID">>, <<"Msg-ID">>, <<"Application-Data">>
+                                                   ,<<"Control-Queue">>, <<"Call-ID">>, <<"Application-Data">>
                                                    ,<<"Account-ID">>
                                               ]).
 -define(OFFNET_RESOURCE_REQ_VALUES, [{<<"Event-Category">>, <<"resource">>}
@@ -40,15 +40,16 @@
                                     ,{<<"Account-ID">>, fun is_binary/1}
                                     ,{<<"Control-Queue">>, fun is_binary/1}
                                     ,{<<"To-DID">>, fun is_binary/1}
-                                    ,{<<"SIP-Headers">>, ?IS_JSON_OBJECT}
-                                    ,{<<"Custom-Channel-Vars">>, ?IS_JSON_OBJECT}
+                                    ,{<<"SIP-Headers">>, fun wh_json:is_json_object/1}
+                                    ,{<<"Custom-Channel-Vars">>, fun wh_json:is_json_object/1}
                                     ,{<<"Flags">>, fun is_list/1}
                                    ]).
 
 %% Offnet Resource Response
 -define(OFFNET_RESOURCE_RESP_HEADERS, [<<"Response-Message">>]).
--define(OPTIONAL_OFFNET_RESOURCE_RESP_HEADERS, [<<"Msg-ID">>, <<"Error-Message">>, <<"Response-Code">>
-                                               ,<<"Call-ID">>, <<"Resource-Response">>]).
+-define(OPTIONAL_OFFNET_RESOURCE_RESP_HEADERS, [<<"Error-Message">>, <<"Response-Code">>
+                                                    ,<<"Call-ID">>, <<"Resource-Response">>
+                                               ]).
 -define(OFFNET_RESOURCE_RESP_VALUES, [{<<"Event-Category">>, <<"resource">>}
                                       ,{<<"Event-Name">>, <<"offnet_resp">>}
                                      ]).

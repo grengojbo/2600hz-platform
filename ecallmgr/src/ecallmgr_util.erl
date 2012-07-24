@@ -1,4 +1,3 @@
-
 %%%-------------------------------------------------------------------
 %%% @copyright (C) 2010-2012, VoIP INC
 %%% @doc
@@ -21,11 +20,15 @@
 -export([fs_log/3, put_callid/1]).
 -export([build_bridge_string/1, build_bridge_string/2]).
 -export([create_masquerade_event/2, create_masquerade_event/3]).
--export([media_path/2, media_path/3]).
+-export([media_path/3, media_path/4]).
 -export([unserialize_fs_array/1]).
 -export([convert_fs_evt_name/1, convert_whistle_app_name/1]).
+-export([fax_filename/1]).
 
--include("ecallmgr.hrl").
+-include_lib("ecallmgr/src/ecallmgr.hrl").
+
+-type send_cmd_ret() :: fs_sendmsg_ret() | fs_api_ret().
+-export_type([send_cmd_ret/0]).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -33,7 +36,6 @@
 %% send the SendMsg proplist to the freeswitch node
 %% @end
 %%--------------------------------------------------------------------
--type send_cmd_ret() :: fs_sendmsg_ret() | fs_api_ret().
 -spec send_cmd/4 :: (atom(), ne_binary(), ne_binary() | string(), ne_binary() | string()) -> send_cmd_ret().
 send_cmd(Node, UUID, App, Args) when not is_list(App) ->
     send_cmd(Node, UUID, wh_util:to_list(App), Args);
@@ -47,24 +49,57 @@ send_cmd(Node, UUID, "xferext", Dialplan) ->
     ecallmgr_util:fs_log(Node, "whistle transfered call to 'xferext' extension", []);
 send_cmd(Node, UUID, App, Args) when not is_list(Args) ->
     send_cmd(Node, UUID, App, wh_util:to_list(Args));
+send_cmd(Node, UUID, "record_call", Args) ->
+    lager:debug("execute on node ~s: uuid_record(~s)", [Node, Args]),
+    _ = ecallmgr_util:fs_log(Node, "whistle executing uuid_record ~s", [Args]),
+    case freeswitch:api(Node, uuid_record, Args) of
+        {ok, _}=Ret ->
+            lager:debug("executing uuid_record returned ~p", [Ret]),
+            Ret;
+        {error, <<"-ERR ", E/binary>>} ->
+            lager:debug("error executing uuid_record: ~s", [E]),
+            Evt = list_to_binary([ecallmgr_util:create_masquerade_event(<<"record_call">>, <<"RECORD_STOP">>)
+                                  ,",whistle_application_response="
+                                  ,"'",binary:replace(E, <<"\n">>, <<>>),"'"
+                                 ]),
+            lager:debug("publishing event: ~s", [Evt]),
+            _ = send_cmd(Node, UUID, "application", Evt),
+            {error, E};
+        timeout ->
+            lager:debug("timeout executing uuid_record"),
+            Evt = list_to_binary([ecallmgr_util:create_masquerade_event(<<"record_call">>, <<"RECORD_STOP">>)
+                                  ,",whistle_application_response=timeout"
+                                 ]),
+            lager:debug("publishing event: ~s", [Evt]),
+            _ = send_cmd(Node, UUID, "application", Evt),
+            {error, timeout}
+    end;
+send_cmd(Node, UUID, "playstop", _Args) ->
+    lager:debug("execute on node ~s: uuid_break(~s all)", [Node, UUID]),
+    _ = ecallmgr_util:fs_log(Node, "whistle executing uuid_break ~s all", [UUID]),
+    freeswitch:api(Node, uuid_break, wh_util:to_list(<<UUID/binary, " all">>));
+send_cmd(Node, UUID, "unbridge", _) ->
+    lager:debug("execute on node ~s: uuid_park(~s)", [Node, UUID]),
+    _ = ecallmgr_util:fs_log(Node, "whistle executing uuid_park ~s", [UUID]),
+    freeswitch:api(Node, uuid_park, wh_util:to_list(UUID));
+send_cmd(Node, _UUID, "broadcast", Args) ->
+    lager:debug("execute on node ~s: uuid_broadcast(~s)", [Node, Args]),
+    _ = ecallmgr_util:fs_log(Node, "whistle executing uuid_broadcast ~s", [Args]),
+    Resp = freeswitch:api(Node, uuid_broadcast, wh_util:to_list(iolist_to_binary(Args))),
+    lager:debug("broadcast resulted in: ~p", [Resp]),
+    Resp;
 send_cmd(Node, UUID, "hangup", _) ->
     lager:debug("terminate call on node ~s", [Node]),
     _ = ecallmgr_util:fs_log(Node, "whistle terminating call", []),
     freeswitch:api(Node, uuid_kill, wh_util:to_list(UUID));
-send_cmd(Node, _UUID, "record_call", Args) ->
-    lager:debug("execute on node ~s: uuid_record(~s)", [Node, Args]),
-    Ret = freeswitch:api(Node, uuid_record, Args),
-    lager:debug("executing uuid_record returned ~p", [Ret]),
-    Ret;
-send_cmd(Node, UUID, "playstop", Args) ->
-    lager:debug("execute on node ~s: uuid_break(~s)", [Node, UUID]),
-    freeswitch:api(Node, uuid_break, Args);
+send_cmd(Node, UUID, "set", "ecallmgr_Account-ID=" ++ Value) ->
+    send_cmd(Node, UUID, "export", "ecallmgr_Account-ID=" ++ Value);
 send_cmd(Node, UUID, AppName, Args) ->
     lager:debug("execute on node ~s: ~s(~s)", [Node, AppName, Args]),
     _ = ecallmgr_util:fs_log(Node, "whistle executing ~s ~s", [AppName, Args]),
     case AppName of
-        "set" -> maybe_update_channel_cache(Args, UUID);
-        "export" -> maybe_update_channel_cache(Args, UUID);
+        "set" -> maybe_update_channel_cache(Args, Node, UUID);
+        "export" -> maybe_update_channel_cache(Args, Node, UUID);
         _Else -> ok
     end,
     freeswitch:sendmsg(Node, UUID, [{"call-command", "execute"}
@@ -72,32 +107,35 @@ send_cmd(Node, UUID, AppName, Args) ->
                                     ,{"execute-app-arg", wh_util:to_list(Args)}
                                    ]).
 
--spec maybe_update_channel_cache/2 :: (string(), ne_binary()) -> 'ok'.
-maybe_update_channel_cache("ecallmgr_Account-ID=" ++ Value, UUID) ->
-    ecallmgr_fs_nodes:channel_set_account_id(UUID, Value);
-maybe_update_channel_cache("ecallmgr_Account-Billing=" ++ Value, UUID) ->
-    ecallmgr_fs_nodes:channel_set_account_billing(UUID, Value);
-maybe_update_channel_cache("ecallmgr_Reseller-ID=" ++ Value, UUID) ->
-    ecallmgr_fs_nodes:channel_set_reseller_id(UUID, Value);
-maybe_update_channel_cache("ecallmgr_Reseller-Billing=" ++ Value, UUID) ->
-    ecallmgr_fs_nodes:channel_set_reseller_billing(UUID, Value);
-maybe_update_channel_cache("ecallmgr_Authorizing-ID=" ++ Value, UUID) ->
-    ecallmgr_fs_nodes:channel_set_authorizing_id(UUID, Value);
-maybe_update_channel_cache("ecallmgr_Resource-ID=" ++ Value, UUID) ->
-    ecallmgr_fs_nodes:channel_set_resource_id(UUID, Value);
-maybe_update_channel_cache("ecallmgr_Authorizing-Type=" ++ Value, UUID) ->
-    ecallmgr_fs_nodes:channel_set_authorizing_type(UUID, Value);
-maybe_update_channel_cache("ecallmgr_Owner-ID=" ++ Value, UUID) ->
-    ecallmgr_fs_nodes:channel_set_owner_id(UUID, Value);
-maybe_update_channel_cache("ecallmgr_Presence-ID=" ++ Value, UUID) ->
-    ecallmgr_fs_nodes:channel_set_presence_id(UUID, Value);
-maybe_update_channel_cache(_, _) ->
+-spec maybe_update_channel_cache/3 :: (string(), atom(), ne_binary()) -> 'ok'.
+maybe_update_channel_cache("ecallmgr_Account-ID=" ++ Value, Node, UUID) ->
+    ecallmgr_fs_nodes:channel_set_account_id(Node, UUID, Value);
+maybe_update_channel_cache("ecallmgr_Billing-ID=" ++ Value, Node, UUID) ->
+    ecallmgr_fs_nodes:channel_set_billing_id(Node, UUID, Value);
+maybe_update_channel_cache("ecallmgr_Account-Billing=" ++ Value, Node, UUID) ->
+    ecallmgr_fs_nodes:channel_set_account_billing(Node, UUID, Value);
+maybe_update_channel_cache("ecallmgr_Reseller-ID=" ++ Value, Node, UUID) ->
+    ecallmgr_fs_nodes:channel_set_reseller_id(Node, UUID, Value);
+maybe_update_channel_cache("ecallmgr_Reseller-Billing=" ++ Value, Node, UUID) ->
+    ecallmgr_fs_nodes:channel_set_reseller_billing(Node, UUID, Value);
+maybe_update_channel_cache("ecallmgr_Authorizing-ID=" ++ Value, Node, UUID) ->
+    ecallmgr_fs_nodes:channel_set_authorizing_id(Node, UUID, Value);
+maybe_update_channel_cache("ecallmgr_Resource-ID=" ++ Value, Node, UUID) ->
+    ecallmgr_fs_nodes:channel_set_resource_id(Node, UUID, Value);
+maybe_update_channel_cache("ecallmgr_Authorizing-Type=" ++ Value, Node, UUID) ->
+    ecallmgr_fs_nodes:channel_set_authorizing_type(Node, UUID, Value);
+maybe_update_channel_cache("ecallmgr_Owner-ID=" ++ Value, Node, UUID) ->
+    ecallmgr_fs_nodes:channel_set_owner_id(Node, UUID, Value);
+maybe_update_channel_cache("ecallmgr_Presence-ID=" ++ Value, Node, UUID) ->
+    ecallmgr_fs_nodes:channel_set_presence_id(Node, UUID, Value);
+maybe_update_channel_cache(_, _, _) ->
     ok.
 
--spec get_expires/1 :: (proplist()) -> number().
+-spec get_expires/1 :: (proplist()) -> integer().
 get_expires(Props) ->
-    Expiry = wh_util:to_integer(props:get_value(<<"Expires">>, Props, 300)),
-    round(Expiry * 1.25) + 120.
+    Expiry = wh_util:to_integer(props:get_value(<<"Expires">>, Props
+                                                ,props:get_value(<<"expires">>, Props, 300))),
+    round(Expiry * 1.25).
 
 -spec get_interface_properties/1 :: (atom()) -> proplist().
 -spec get_interface_properties/2 :: (atom(), string() | ne_binary()) -> proplist().
@@ -243,7 +281,7 @@ build_bridge_string(Endpoints, Seperator) ->
                   ,wh_json:get_value(<<"Route">>, Endpoint)
                  ]
                  ,Endpoint}
-                || Endpoint <- Endpoints
+                || Endpoint <- Endpoints, wh_json:is_json_object(Endpoint)
                ],
     BridgeStrings = build_bridge_endpoints(props:unique(KeyedEPs), []),
     %% NOTE: dont use binary_join here as it will crash on an empty list...
@@ -277,7 +315,10 @@ build_bridge_endpoints([{_, Endpoint}|Endpoints], Channels) ->
 -spec build_bridge_endpoint/1 :: (wh_json:json_object()) -> binary().
 -spec build_bridge_endpoint/3 :: (wh_json:json_object(), ne_binary(), [nonempty_string(),...] | []) -> binary().
 build_bridge_endpoint(JObj) ->
-    build_bridge_endpoint(JObj, wh_json:get_value(<<"Endpoint-Type">>, JObj, <<"sip">>), ecallmgr_fs_xml:get_leg_vars(JObj)).
+    build_bridge_endpoint(JObj
+                          ,wh_json:get_value(<<"Endpoint-Type">>, JObj, <<"sip">>)
+                          ,ecallmgr_fs_xml:get_leg_vars(JObj)
+                         ).
 
 build_bridge_endpoint(JObj, <<"sip">>, CVs) ->
     case ecallmgr_fs_xml:build_sip_route(JObj, wh_json:get_value(<<"Invite-Format">>, JObj)) of
@@ -316,25 +357,25 @@ create_masquerade_event(Application, EventName, Boolean) ->
 %% @doc
 %% @end
 %%--------------------------------------------------------------------
--spec media_path/2 :: (ne_binary(), ne_binary()) -> ne_binary().
--spec media_path/3 :: (ne_binary(), 'extant' | 'new', ne_binary()) -> ne_binary().
-media_path(MediaName, UUID) ->
-    media_path(MediaName, new, UUID).
+-spec media_path/3 :: (ne_binary(), ne_binary(), wh_json:json_object()) -> ne_binary().
+-spec media_path/4 :: (ne_binary(), 'extant' | 'new', ne_binary(), wh_json:json_object()) -> ne_binary().
+media_path(MediaName, UUID, JObj) ->
+    media_path(MediaName, new, UUID, JObj).
 
-media_path(undefined, _Type, _UUID) ->
+media_path(undefined, _Type, _UUID, _) ->
     <<"silence_stream://5">>;
-media_path(MediaName, Type, UUID) when not is_binary(MediaName) ->
-    media_path(wh_util:to_binary(MediaName), Type, UUID);
-media_path(<<"silence_stream://", _/binary>> = Media, _Type, _UUID) ->
+media_path(MediaName, Type, UUID, JObj) when not is_binary(MediaName) ->
+    media_path(wh_util:to_binary(MediaName), Type, UUID, JObj);
+media_path(<<"silence_stream://", _/binary>> = Media, _Type, _UUID, _) ->
     Media;
-media_path(<<"tone_stream://", _/binary>> = Media, _Type, _UUID) ->
+media_path(<<"tone_stream://", _/binary>> = Media, _Type, _UUID, _) ->
     Media;
-media_path(<<"local_stream://", FSPath/binary>>, _Type, _UUID) ->
+media_path(<<"local_stream://", FSPath/binary>>, _Type, _UUID, _) ->
     FSPath;
-media_path(<<"http://", _/binary>> = URI, _Type, _UUID) ->
+media_path(<<"http://", _/binary>> = URI, _Type, _UUID, _) ->
     get_fs_playback(URI);
-media_path(MediaName, Type, UUID) ->
-    case ecallmgr_media_registry:lookup_media(MediaName, Type, UUID) of
+media_path(MediaName, Type, UUID, JObj) ->
+    case ecallmgr_media_registry:lookup_media(MediaName, Type, UUID, JObj) of
         {'error', _E} ->
             lager:debug("failed to get media ~s: ~p", [MediaName, _E]),
             wh_util:to_binary(MediaName);
@@ -342,6 +383,11 @@ media_path(MediaName, Type, UUID) ->
             lager:debug("recevied URL: ~s", [Url]),
             wh_util:to_binary(get_fs_playback(Url))
     end.
+
+fax_filename(UUID) ->
+    filename:join([ecallmgr_config:get(<<"fax_file_path">>, <<"/tmp/">>)
+                   ,<<(amqp_util:encode(UUID))/binary, ".tiff">>
+                  ]).
 
 %%--------------------------------------------------------------------
 %% @private

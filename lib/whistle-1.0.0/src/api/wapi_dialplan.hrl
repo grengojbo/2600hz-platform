@@ -11,6 +11,14 @@
 
 %% For dialplan messages, an optional insert-at tuple is common across all requests
 -define(INSERT_AT_TUPLE, {<<"Insert-At">>, [<<"head">>, <<"tail">>, <<"flush">>, <<"now">>]}).
+-define(IS_TERMINATOR, fun(X) when is_list(X) -> true;
+                          (<<>>) -> true;
+                          (<<"none">>) -> true;
+                          (_) -> false
+                       end).
+
+-define(DIAL_METHOD_SINGLE, <<"single">>).
+-define(DIAL_METHOD_SIMUL, <<"simultaneous">>).
 
 -define(BRIDGE_REQ_HEADERS, [<<"Application-Name">>, <<"Call-ID">>, <<"Endpoints">>]).
 -define(OPTIONAL_BRIDGE_REQ_HEADERS, [<<"Timeout">>, <<"Continue-On-Fail">>, <<"Ignore-Early-Media">>
@@ -20,18 +28,21 @@
                                           ,<<"Callee-ID-Name">>, <<"Callee-ID-Number">>
                                           ,<<"Ringback">>, <<"Dial-Endpoint-Method">>, <<"Insert-At">>
                                           ,<<"Media">>, <<"Hold-Media">>, <<"SIP-Headers">>, <<"Custom-Channel-Vars">>
+                                          ,<<"SIP-Transport">>, <<"Secure-RTP">>
                                      ]).
 -define(BRIDGE_REQ_VALUES, [{<<"Event-Category">>, <<"call">>}
                             ,{<<"Event-Name">>, <<"command">>}
                             ,{<<"Application-Name">>, <<"bridge">>}
-                            ,{<<"Dial-Endpoint-Method">>, [<<"single">>, <<"simultaneous">>]}
+                            ,{<<"Dial-Endpoint-Method">>, [?DIAL_METHOD_SINGLE, ?DIAL_METHOD_SIMUL]}
                             ,{<<"Media">>, [<<"process">>, <<"bypass">>, <<"auto">>]}
                             ,{<<"Continue-On-Fail">>, [<<"true">>, <<"false">>]}
+                            ,{<<"SIP-Transport">>, [<<"udp">>, <<"tcp">>, <<"tls">>]}
+                            ,{<<"Secure-RTP">>, [<<"true">>, <<"false">>]}
                             ,?INSERT_AT_TUPLE
                            ]).
 -define(BRIDGE_REQ_TYPES, [{<<"Endpoints">>, fun is_list/1}
-                           ,{<<"SIP-Headers">>, ?IS_JSON_OBJECT}
-                           ,{<<"Custom-Channel-Vars">>, ?IS_JSON_OBJECT}
+                           ,{<<"SIP-Headers">>, fun wh_json:is_json_object/1}
+                           ,{<<"Custom-Channel-Vars">>, fun wh_json:is_json_object/1}
                           ]).
 
 %% Bridge Endpoints
@@ -52,15 +63,16 @@
                                      ,{<<"Bypass-Media">>, [<<"true">>, <<"false">>]}
                                      ,{<<"Endpoint-Type">>, [<<"sip">>, <<"freetdm">>]}
                                     ]).
--define(BRIDGE_REQ_ENDPOINT_TYPES, [{<<"SIP-Headers">>, ?IS_JSON_OBJECT}
-                                    ,{<<"Custom-Channel-Vars">>, ?IS_JSON_OBJECT}
-                                    ,{<<"Endpoint-Options">>, ?IS_JSON_OBJECT}
+-define(BRIDGE_REQ_ENDPOINT_TYPES, [{<<"SIP-Headers">>, fun wh_json:is_json_object/1}
+                                    ,{<<"Custom-Channel-Vars">>, fun wh_json:is_json_object/1}
+                                    ,{<<"Endpoint-Options">>, fun wh_json:is_json_object/1}
                                    ]).
 
 %% Store Request
 -define(STORE_REQ_HEADERS, [<<"Application-Name">>, <<"Call-ID">>, <<"Media-Name">>, <<"Media-Transfer-Method">>
-                                ,<<"Media-Transfer-Destination">>]).
--define(OPTIONAL_STORE_REQ_HEADERS, [<<"Media-Additional-Headers">>, <<"Insert-At">>]).
+                                ,<<"Media-Transfer-Destination">>
+                           ]).
+-define(OPTIONAL_STORE_REQ_HEADERS, [<<"Additional-Headers">>, <<"Insert-At">>]).
 -define(STORE_REQ_VALUES, [{<<"Event-Category">>, <<"call">>}
                            ,{<<"Event-Name">>, <<"command">>}
                            ,{<<"Application-Name">>, <<"store">>}
@@ -69,11 +81,25 @@
                           ]).
 -define(STORE_REQ_TYPES, [{<<"Additional-Headers">>, fun is_list/1}]).
 
+%% Store Fax
+-define(STORE_FAX_HEADERS, [<<"Application-Name">>, <<"Call-ID">>, <<"Media-Transfer-Method">>
+                                ,<<"Media-Transfer-Destination">>
+                           ]).
+-define(OPTIONAL_STORE_FAX_HEADERS, [<<"Additional-Headers">>, <<"Insert-At">>]).
+-define(STORE_FAX_VALUES, [{<<"Event-Category">>, <<"call">>}
+                           ,{<<"Event-Name">>, <<"command">>}
+                           ,{<<"Application-Name">>, <<"store_fax">>}
+                           ,{<<"Media-Transfer-Method">>, <<"put">>}
+                           ,?INSERT_AT_TUPLE
+                          ]).
+-define(STORE_FAX_TYPES, [{<<"Additional-Headers">>, fun is_list/1}]).
+
+
 %% Store (via AMQP) Response
 -define(STORE_AMQP_RESP_HEADERS, [<<"Call-ID">>, <<"Application-Name">>, <<"Media-Transfer-Method">>
-                                      ,<<"Media-Name">>, <<"Media-Sequence-ID">>, <<"Media-Content">>
+                                      ,<<"Media-Name">>, <<"Media-Content">>
                                  ]).
--define(OPTIONAL_STORE_AMQP_RESP_HEADERS, []).
+-define(OPTIONAL_STORE_AMQP_RESP_HEADERS, [<<"Media-Sequence-ID">>]).
 -define(STORE_AMQP_RESP_VALUES, [{<<"Application-Name">>, <<"store">>}
                                  ,{<<"Media-Transfer-Method">>, <<"stream">>}
                                 ]).
@@ -90,14 +116,21 @@
                                  ,{<<"Event-Name">>, <<"response">>}
                                  ,{<<"Event-Category">>, <<"call">>}
                                 ]).
--define(STORE_HTTP_RESP_TYPES, [{<<"Media-Transfer-Results">>, fun({struct, L}) when is_list(L) ->
-                                                                       true;
-                                                                  (_) -> false
-                                                               end}]).
+-define(STORE_HTTP_RESP_TYPES, [{<<"Media-Transfer-Results">>, fun wh_json:is_json_object/1}]).
+
+%% Send DTMF Request
+-define(SEND_DTMF_HEADERS, [<<"Call-ID">>, <<"Application-Name">>, <<"DTMFs">>]).
+-define(OPTIONAL_SEND_DTMF_HEADERS, [<<"Insert-At">>, <<"Duration">>]).
+-define(SEND_DTMF_VALUES, [{<<"Event-Category">>, <<"call">>}
+                           ,{<<"Event-Name">>, <<"command">>}
+                           ,{<<"Application-Name">>, <<"send_dtmf">>}
+                           ,?INSERT_AT_TUPLE
+                          ]).
+-define(SEND_DTMF_TYPES, []).
 
 %% Tones Request
 -define(TONES_REQ_HEADERS, [<<"Call-ID">>, <<"Application-Name">>, <<"Tones">>]).
--define(OPTIONAL_TONES_REQ_HEADERS, [<<"Insert-At">>]).
+-define(OPTIONAL_TONES_REQ_HEADERS, [<<"Insert-At">>, <<"Terminators">>]).
 -define(TONES_REQ_VALUES, [{<<"Event-Category">>, <<"call">>}
                            ,{<<"Event-Name">>, <<"command">>}
                            ,{<<"Application-Name">>, <<"tones">>}
@@ -174,6 +207,16 @@
                            ]).
 -define(RING_REQ_TYPES, []).
 
+%% Recv Fax
+-define(RECV_FAX_HEADERS, [<<"Application-Name">>, <<"Call-ID">>]).
+-define(OPTIONAL_RECV_FAX_HEADERS, []).
+-define(RECV_FAX_VALUES, [{<<"Event-Category">>, <<"call">>}
+                          ,{<<"Event-Name">>, <<"command">>}
+                          ,{<<"Application-Name">>, <<"receive_fax">>}
+                          ,?INSERT_AT_TUPLE
+                         ]).
+-define(RECV_FAX_TYPES, []).
+
 %% Hangup
 %% Include the Other-Leg-Call-ID to only hangup the other leg
 -define(HANGUP_REQ_HEADERS, [<<"Application-Name">>, <<"Call-ID">>]).
@@ -214,8 +257,8 @@
                          ,{<<"Application-Name">>, <<"set">>}
                          ,?INSERT_AT_TUPLE
                          ]).
--define(SET_REQ_TYPES, [{<<"Custom-Channel-Vars">>,?IS_JSON_OBJECT}
-                        ,{<<"Custom-Call-Vars">>, ?IS_JSON_OBJECT}
+-define(SET_REQ_TYPES, [{<<"Custom-Channel-Vars">>,fun wh_json:is_json_object/1}
+                        ,{<<"Custom-Call-Vars">>, fun wh_json:is_json_object/1}
                        ]).
 
 %% Fetch
@@ -245,14 +288,17 @@
 
 %% Play Request
 -define(PLAY_REQ_HEADERS, [<<"Application-Name">>, <<"Call-ID">>, <<"Media-Name">>]).
--define(OPTIONAL_PLAY_REQ_HEADERS, [<<"Terminators">>, <<"Insert-At">>, <<"Leg">>]).
+-define(OPTIONAL_PLAY_REQ_HEADERS, [<<"Terminators">>, <<"Insert-At">>, <<"Leg">>
+                                        ,<<"Voice">>, <<"Language">>, <<"Format">>
+                                        ,<<"Group-ID">> % group media together (one DTMF cancels all in group)
+                                   ]).
 -define(PLAY_REQ_VALUES, [{<<"Event-Category">>, <<"call">>}
                           ,{<<"Event-Name">>, <<"command">>}
                           ,{<<"Application-Name">>, <<"play">>}
                           ,{<<"Leg">>, [<<"A">>, <<"B">>, <<"Both">>]}
                           ,?INSERT_AT_TUPLE
                          ]).
--define(PLAY_REQ_TYPES, [{<<"Terminators">>, fun is_list/1}]).
+-define(PLAY_REQ_TYPES, [{<<"Terminators">>, ?IS_TERMINATOR}]).
 
 %% PlayStop Request
 -define(PLAY_STOP_REQ_HEADERS, [<<"Application-Name">>, <<"Call-ID">>]).
@@ -262,7 +308,7 @@
                                ,{<<"Application-Name">>, <<"playstop">>}
                                ,{<<"Insert-At">>, <<"now">>}
                               ]).
--define(PLAY_STOP_REQ_TYPES, [{<<"Terminators">>, fun is_list/1}]).
+-define(PLAY_STOP_REQ_TYPES, [{<<"Terminators">>, ?IS_TERMINATOR}]).
 
 %% Record Request
 -define(RECORD_REQ_HEADERS, [<<"Application-Name">>, <<"Call-ID">>, <<"Media-Name">>]).
@@ -274,7 +320,7 @@
                             ,{<<"Application-Name">>, <<"record">>}
                             ,?INSERT_AT_TUPLE
                            ]).
--define(RECORD_REQ_TYPES, [{<<"Terminators">>, fun is_list/1}]).
+-define(RECORD_REQ_TYPES, [{<<"Terminators">>, ?IS_TERMINATOR}]).
 
 %% Record Call Leg into MediaName
 %% Stream-To = local results in the recording being stored on the media server
@@ -375,13 +421,13 @@
 %% IMPORTANT: to use the filter-applications list, Insert-At must be "now"
 
 -define(NOOP_REQ_HEADERS, [<<"Application-Name">>, <<"Call-ID">>]).
--define(OPTIONAL_NOOP_REQ_HEADERS, [<<"Msg-ID">>, <<"Insert-At">>, <<"Filter-Applications">>]).
+-define(OPTIONAL_NOOP_REQ_HEADERS, [<<"Insert-At">>, <<"Filter-Applications">>]).
 -define(NOOP_REQ_VALUES, [{<<"Event-Category">>, <<"call">>}
                           ,{<<"Event-Name">>, <<"command">>}
                           ,{<<"Application-Name">>, <<"noop">>}
                           ,?INSERT_AT_TUPLE
                          ]).
--define(NOOP_REQ_TYPES, [{<<"Msg-ID">>, fun is_binary/1}]).
+-define(NOOP_REQ_TYPES, []).
 
 %% Conference
 -define(CONFERENCE_REQ_HEADERS, [<<"Application-Name">>, <<"Call-ID">>, <<"Conference-ID">>]).
@@ -399,7 +445,7 @@
                               ]).
 
 %% Originate Ready
--define(ORIGINATE_READY_HEADERS, [<<"Msg-ID">>, <<"Call-ID">>, <<"Control-Queue">>]).
+-define(ORIGINATE_READY_HEADERS, [<<"Call-ID">>, <<"Control-Queue">>]).
 -define(OPTIONAL_ORIGINATE_READY_HEADERS, []).
 -define(ORIGINATE_READY_VALUES, [{<<"Event-Category">>, <<"dialplan">>}
                                  ,{<<"Event-Name">>, <<"originate_ready">>}
@@ -407,7 +453,7 @@
 -define(ORIGINATE_READY_TYPES, []).
 
 %% Originate Execute
--define(ORIGINATE_EXECUTE_HEADERS, [<<"Msg-ID">>, <<"Call-ID">>]).
+-define(ORIGINATE_EXECUTE_HEADERS, [<<"Call-ID">>]).
 -define(OPTIONAL_ORIGINATE_EXECUTE_HEADERS, []).
 -define(ORIGINATE_EXECUTE_VALUES, [{<<"Event-Category">>, <<"dialplan">>}
                                  ,{<<"Event-Name">>, <<"originate_execute">>}

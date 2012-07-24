@@ -8,7 +8,11 @@
 %%%-------------------------------------------------------------------
 -module(media_single).
 
--export([init/3, terminate/2, handle/2, stream/5]).
+-export([init/3
+         ,terminate/2
+         ,handle/2
+         ,stream/5
+        ]).
 
 -include("media.hrl").
 

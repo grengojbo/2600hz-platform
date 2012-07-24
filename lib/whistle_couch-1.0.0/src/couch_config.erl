@@ -26,12 +26,13 @@ start_link() ->
     lager:debug("loaded couch configs"),
     ignore.
 
--spec load_config/1 :: (file:name()) -> 'ok' | {'error', 'enoent'}.
+-spec load_config/1 :: (file:name()) -> {'ok', wh_json:json_object()} |
+                                        {'error', 'enoent'}.
 load_config(Path) ->
     lager:debug("loading ~s", [Path]),
     case file:consult(Path) of
         {ok, Startup} ->
-            store(<<"couch_host">>, props:get_value(couch_host, Startup)),
+            _ = store(<<"couch_host">>, props:get_value(couch_host, Startup)),
             store(<<"default_couch_host">>, props:get_value(default_couch_host, Startup));
         {error, enoent}=E ->
             E
@@ -40,7 +41,6 @@ load_config(Path) ->
 ready() ->
     whapps_config:flush(?CONFIG_CAT),
     whapps_config:couch_ready().
-
 
 fetch(Key) ->
     fetch(Key, undefined).
@@ -54,10 +54,10 @@ fetch(Key, Default, Cache) ->
         {ok, V} -> V
     end.
 
--spec store/2 :: (term(), term()) -> 'ok'.
+-spec store/2 :: (term(), term()) -> {'ok', wh_json:json_object()}.
 store(Key, Value) ->
     whapps_config:set(?CONFIG_CAT, wh_util:to_binary(Key), Value).
 
--spec store/3 :: (term(), term(), pid()) -> 'ok'.
+-spec store/3 :: (term(), term(), atom()) -> 'ok'.
 store(Key, Value, Cache) ->
     wh_cache:store_local(Cache, {?MODULE, wh_util:to_binary(Key)}, Value, ?MILLISECONDS_IN_DAY).

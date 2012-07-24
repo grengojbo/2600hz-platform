@@ -25,6 +25,8 @@
 
 -type api_terms() :: wh_json:json_object() | wh_json:json_proplist().
 
+-type wh_deeplist() :: [term() | wh_deeplist()].
+
 %% non-empty binary
 -define(NE_BINARY, <<_:8,_/binary>>).
 -type ne_binary() :: <<_:8,_:_*8>>.
@@ -38,9 +40,9 @@
 %% for setting types on dicts
 -type dict(K,V) :: [{K, V}].
 
--type wh_proplist_value() :: binary() | atom() | number() | string().
+-type wh_proplist_value() :: binary() | atom() | number() | string() | list().
 -type wh_proplist_key() :: binary() | atom() | number() | string().
--type wh_proplist_kv(K, V) :: [{K, V},...] | [].
+-type wh_proplist_kv(K, V) :: [{K, V} | atom(),...] | [].
 -type wh_proplist_k(K) :: wh_proplist_kv(K, wh_proplist_value()).
 -type wh_proplist() :: wh_proplist_kv(proplist_key(), wh_proplist_value()).
 

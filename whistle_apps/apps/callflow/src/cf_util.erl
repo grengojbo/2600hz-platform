@@ -1,3 +1,12 @@
+%%%-------------------------------------------------------------------
+%%% @copyright (C) 2011-2012, VoIP INC
+%%% @doc
+%%%
+%%% @end
+%%% @contributors
+%%%   Karl Anderson
+%%%   James Aimonetti
+%%%-------------------------------------------------------------------
 -module(cf_util).
 
 -include("callflow.hrl").
@@ -5,7 +14,6 @@
 -export([presence_probe/2]).
 -export([presence_mwi_query/2]).
 -export([update_mwi/1, update_mwi/2, update_mwi/4]).
--export([get_call_status/1]).
 -export([alpha_to_dialpad/1, ignore_early_media/1]).
 -export([correct_media_path/2]).
 -export([lookup_callflow/1, lookup_callflow/2]).
@@ -33,18 +41,20 @@ presence_probe(JObj, _Props) ->
     [Fun(Subscription, {FromUser, FromRealm}, {ToUser, ToRealm}, JObj) || Fun <- ProbeRepliers].
 
 -spec presence_mwi_update/4 :: (ne_binary(), {ne_binary(), ne_binary()}, {ne_binary(), ne_binary()}, wh_json:json_object()) -> ok.
-presence_mwi_update(<<"message-summary">>, {FromUser, FromRealm}, _, _) ->
+presence_mwi_update(<<"message-summary">>, {FromUser, FromRealm}, _, JObj) ->
     case whapps_util:get_account_by_realm(FromRealm) of
         {ok, AccountDb} ->
-            ViewOptions = [{<<"include_docs">>, true}
-                           ,{<<"key">>, FromUser}
+            ViewOptions = [include_docs
+                           ,{key, FromUser}
                           ],
             case couch_mgr:get_results(AccountDb, <<"cf_attributes/sip_credentials">>, ViewOptions) of
                 {ok, []} ->
                     lager:debug("sip credentials not in account db ~s", [AccountDb]),
                     ok;
                 {ok, [Device]} -> 
-                    update_mwi(wh_json:get_value([<<"doc">>, <<"owner_id">>], Device), AccountDb);
+                    lager:debug("replying to mwi presence probe"),
+                    OwnerId = wh_json:get_value([<<"doc">>, <<"owner_id">>], Device),
+                    presence_mwi_resp(FromUser, FromRealm, OwnerId, AccountDb, JObj);
                 {error, _R} -> 
                     lager:debug("unable to lookup sip credentials for owner id: ~p", [_R]),
                     ok
@@ -81,7 +91,7 @@ presence_parking_slot(_, {_, FromRealm}, {ToUser, ToRealm}, _) ->
 -spec manual_presence/4 :: (ne_binary(), {ne_binary(), ne_binary()}, {ne_binary(), ne_binary()}, wh_json:json_object()) -> ok.
 manual_presence(<<"message-summary">>, _, _, _) ->
     ok;
-manual_presence(_, {_, FromRealm}, {ToUser, ToRealm}, _) ->
+manual_presence(_, {_, FromRealm}, {ToUser, ToRealm}, Event) ->
     case whapps_util:get_account_by_realm(FromRealm) of
         {ok, AccountDb} ->
             case couch_mgr:open_doc(AccountDb, ?MANUAL_PRESENCE_DOC) of
@@ -91,7 +101,14 @@ manual_presence(_, {_, FromRealm}, {ToUser, ToRealm}, _) ->
                     case wh_json:get_value(PresenceId, JObj) of
                         undefined -> ok;
                         State ->
-                            whapps_call_command:presence(State, PresenceId, wh_util:to_hex_binary(crypto:md5(PresenceId)))
+                            PresenceUpdate = [{<<"Presence-ID">>, PresenceId}
+                                              ,{<<"State">>, State}
+                                              ,{<<"Call-ID">>, wh_util:to_hex_binary(crypto:md5(PresenceId))}
+                                              ,{<<"Switch-Nodename">>, wh_json:get_ne_value(<<"Switch-Nodename">>, Event)}
+                                              ,{<<"Subscription-Call-ID">>, wh_json:get_ne_value(<<"Subscription-Call-ID">>, Event)}
+                                              | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
+                                             ],
+                            wapi_notifications:publish_presence_update(PresenceUpdate)
                         end
             end;
         _E -> ok
@@ -104,22 +121,63 @@ manual_presence(_, {_, FromRealm}, {ToUser, ToRealm}, _) ->
 %%--------------------------------------------------------------------
 -spec presence_mwi_query/2 :: (wh_json:json_object(), proplist()) -> 'ok'.
 presence_mwi_query(JObj, _Props) -> 
-    wh_util:put_callid(JObj),
+    _ = wh_util:put_callid(JObj),
     Username = wh_json:get_value(<<"Username">>, JObj), 
     Realm = wh_json:get_value(<<"Realm">>, JObj),
     case whapps_util:get_account_by_realm(Realm) of
         {ok, AccountDb} ->
-            ViewOptions = [{<<"include_docs">>, true}
-                           ,{<<"key">>, Username}
+            ViewOptions = [include_docs
+                           ,{key, Username}
                           ],
             case couch_mgr:get_results(AccountDb, <<"cf_attributes/sip_credentials">>, ViewOptions) of
                 {ok, []} ->  ok;
                 {ok, [Device]} -> 
                     lager:debug("replying to mwi query"),
-                    update_mwi(wh_json:get_value([<<"doc">>, <<"owner_id">>], Device), AccountDb);
+                    OwnerId = wh_json:get_value([<<"doc">>, <<"owner_id">>], Device),
+                    presence_mwi_resp(Username, Realm, OwnerId, AccountDb, JObj);
                 {error, _R} -> ok
             end;
         _Else -> ok
+    end.
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% 
+%% @end
+%%--------------------------------------------------------------------
+-spec presence_mwi_resp/5 :: (ne_binary(), ne_binary(), 'undefined' | ne_binary(), ne_binary(), wh_json:json_object()) -> 'ok'.
+presence_mwi_resp(_, _, undefined, _, _) -> ok;
+presence_mwi_resp(Username, Realm, OwnerId, AccountDb, JObj) ->
+    ViewOptions = [{reduce, true}
+                   ,{group, true}
+                   ,{group_level, 2}
+                   ,{startkey, [OwnerId]}
+                   ,{endkey, [OwnerId, "\ufff0"]}
+                  ],
+    case couch_mgr:get_results(AccountDb, <<"cf_attributes/vm_count_by_owner">>, ViewOptions) of
+        {ok, MessageCounts} -> 
+            Props = [{wh_json:get_value([<<"key">>, 2], MessageCount), wh_json:get_value(<<"value">>, MessageCount)}
+                     || MessageCount <- MessageCounts
+                    ],
+            New = props:get_value(<<"new">>, Props, 0),
+            Saved = props:get_value(<<"saved">>, Props, 0),
+            DefaultAccount = <<"sip:", Username/binary, "@", Realm/binary>>,
+            Command = [{<<"Messages-New">>, New}
+                       ,{<<"Messages-Saved">>, Saved}
+                       ,{<<"Call-ID">>, wh_json:get_value(<<"Call-ID">>, JObj)}
+                       ,{<<"Switch-Nodename">>, wh_json:get_value(<<"Switch-Nodename">>, JObj)}
+                       ,{<<"Subscription-Call-ID">>, wh_json:get_value(<<"Subscription-Call-ID">>, JObj)}
+                       ,{<<"Notify-User">>, Username}
+                       ,{<<"Notify-Realm">>, Realm}
+                       ,{<<"Message-Account">>, wh_json:get_value(<<"Message-Account">>, JObj, DefaultAccount)}
+                       | wh_api:default_headers(?APP_NAME, ?APP_VERSION)
+                      ],
+            lager:debug("updating MWI for owner ~s: (~b/~b)", [OwnerId, New, Saved]),
+            wapi_notifications:publish_mwi_update(Command);
+        {error, _R} ->
+            lager:debug("unable to lookup vm counts by owner: ~p", [_R]),
+            ok
     end.
 
 %%--------------------------------------------------------------------
@@ -138,11 +196,12 @@ update_mwi(Call) ->
 update_mwi(undefined, _) ->
     ok;
 update_mwi(OwnerId, AccountDb) ->
-    ViewOptions = [{<<"reduce">>, true}
-                   ,{<<"group">>, true}
-                   ,{<<"startkey">>, [OwnerId]}
-                   ,{<<"endkey">>, [OwnerId, "\ufff0"]}
-                  ],    
+    ViewOptions = [{reduce, true}
+                   ,{group, true}
+                   ,{group_level, 2}
+                   ,{startkey, [OwnerId]}
+                   ,{endkey, [OwnerId, "\ufff0"]}
+                  ],
     case couch_mgr:get_results(AccountDb, <<"cf_attributes/vm_count_by_owner">>, ViewOptions) of
         {ok, MessageCounts} -> 
             Props = [{wh_json:get_value([<<"key">>, 2], MessageCount), wh_json:get_value(<<"value">>, MessageCount)}
@@ -156,9 +215,9 @@ update_mwi(OwnerId, AccountDb) ->
 
 update_mwi(New, Saved, OwnerId, AccountDb) ->
     AccountId = wh_util:format_account_id(AccountDb, raw),
-    ViewOptions = [{<<"key">>, [OwnerId, <<"device">>]}
-                   ,{<<"include_docs">>, true}
-                  ],    
+    ViewOptions = [{key, [OwnerId, <<"device">>]}
+                   ,include_docs
+                  ],
     case couch_mgr:get_results(AccountDb, <<"cf_attributes/owned">>, ViewOptions) of
         {ok, Devices} -> 
             lager:debug("updating MWI for owner ~s: (~b/~b) on ~b devices", [OwnerId, New, Saved, length(Devices)]),
@@ -172,6 +231,7 @@ update_mwi(New, Saved, OwnerId, AccountDb) ->
                                   Realm = cf_util:get_sip_realm(Device, AccountId),
                                   Command = wh_json:from_list([{<<"Notify-User">>, User}
                                                                ,{<<"Notify-Realm">>, Realm}
+                                                               ,{<<"Message-Account">>, <<"sip:", User/binary, "@", Realm/binary>>}
                                                                | CommonHeaders
                                                               ]),
                                   catch (wapi_notifications:publish_mwi_update(Command))
@@ -181,33 +241,6 @@ update_mwi(New, Saved, OwnerId, AccountDb) ->
             lager:debug("failed to find devices owned by ~s: ~p", [OwnerId, _R]),
             ok
     end.
-
-
-%%--------------------------------------------------------------------
-%% @public
-%% @doc
-%% 
-%% @end
-%%--------------------------------------------------------------------
--spec get_call_status/1 :: (ne_binary()) -> {ok, wh_json:json_object()} | {error, timeout | wh_json:json_object()}.
-get_call_status(CallId) ->
-    {ok, Srv} = callflow_sup:listener_proc(),
-    gen_server:cast(Srv, {add_consumer, CallId, self()}),
-    Command = [{<<"Call-ID">>, CallId}
-               | wh_api:default_headers(gen_listener:queue_name(Srv), ?APP_NAME, ?APP_VERSION)
-              ],
-    wapi_call:publish_channel_status_req(CallId, Command),
-    Result = receive
-                 {call_status_resp, JObj} -> 
-                    case wh_json:get_value(<<"Status">>, JObj) of 
-                        <<"active">> -> {ok, JObj};
-                        _Else -> {error, JObj}
-                    end
-             after
-                 2000 -> {error, timeout}
-             end,
-    gen_server:cast(Srv, {remove_consumer, self()}),
-    Result.
 
 %%--------------------------------------------------------------------
 %% @public
@@ -305,7 +338,7 @@ lookup_callflow(Number, AccountId) ->
 
 do_lookup_callflow(Number, Db) ->
     lager:debug("searching for callflow in ~s to satisfy '~s'", [Db, Number]),
-    Options = [{<<"key">>, Number}, {<<"include_docs">>, true}],
+    Options = [{key, Number}, include_docs],
     case couch_mgr:get_results(Db, ?LIST_BY_NUMBER, Options) of
         {ok, []} when Number =/= ?NO_MATCH_CF ->
             case lookup_callflow_patterns(Number, Db) of
@@ -318,11 +351,11 @@ do_lookup_callflow(Number, Db) ->
             end;
         {ok, []} ->
             {error, not_found};
-        {ok, [{struct, _}=JObj]} ->
+        {ok, [JObj]} ->
             Flow = wh_json:get_value(<<"doc">>, JObj),
             wh_cache:store({cf_flow, Number, Db}, Flow),
             {ok, Flow, Number =:= ?NO_MATCH_CF};
-        {ok, [{struct, _}=JObj | _Rest]} ->
+        {ok, [JObj | _Rest]} ->
             lager:debug("lookup resulted in more than one result, using the first"),
             Flow = wh_json:get_value(<<"doc">>, JObj),
             wh_cache:store({cf_flow, Number, Db}, Flow),
@@ -342,7 +375,7 @@ do_lookup_callflow(Number, Db) ->
                                     -> {'ok', {wh_json:json_object(), ne_binary()}} | {'error', term()}.
 lookup_callflow_patterns(Number, Db) ->
     lager:debug("lookup callflow patterns for ~s in ~s", [Number, Db]),
-    case couch_mgr:get_results(Db, ?LIST_BY_PATTERN, [{<<"include_docs">>, true}]) of
+    case couch_mgr:get_results(Db, ?LIST_BY_PATTERN, [include_docs]) of
         {ok, Patterns} ->
             case test_callflow_patterns(Patterns, Number, {undefined, <<>>}) of
                 {undefined, <<>>} -> {error, not_found};

@@ -6,6 +6,7 @@
 %%% @contributors
 %%%   Karl Anderson
 %%%   James Aimonetti
+%%%   Jon Blanton
 %%%-------------------------------------------------------------------
 -module(v1_resource).
 
@@ -89,7 +90,15 @@ terminate(Req, Context) ->
     _ = v1_util:request_terminated(Req, Context),
     lager:debug("session finished").
 
-rest_terminate(Req, #cb_context{start=T1}=Context) ->
+rest_terminate(Req, #cb_context{start=T1, method='OPTIONS'}=Context) ->
+    _ = v1_util:finish_request(Req, Context),
+    lager:debug("fulfilled in ~p ms", [timer:now_diff(now(), T1) div 1000]);
+rest_terminate(Req, #cb_context{start=T1, resp_status=Status, auth_account_id=AcctId}=Context) ->
+    case Status of
+	success -> wh_counter:inc(<<"crossbar.requests.successes">>);
+	_ -> wh_counter:inc(<<"crossbar.requests.failures">>)
+    end,
+    wh_counter:inc(<<"crossbar.requests.accounts.", (wh_util:to_binary(AcctId))/binary>>),
     _ = v1_util:finish_request(Req, Context),
     lager:debug("fulfilled in ~p ms", [timer:now_diff(now(), T1) div 1000]).
 
@@ -137,9 +146,20 @@ check_preflight(Req0, #cb_context{allowed_methods=Methods, req_nouns=[{Mod, Para
                 {false, Req2} ->
                     lager:debug("not CORS preflight"),
                     {ok, Req3} = v1_util:add_cors_headers(Req2, Context),
-                    {Methods1, Req3, Context#cb_context{allow_methods=Methods1
-                                                        ,req_verb=Verb
-                                                       }}
+		    VerbAtom = wh_util:to_atom(wh_util:to_upper_binary(Verb)),
+		    case lists:member(VerbAtom, Methods1) of
+			true ->
+			    {Methods1, Req3, Context#cb_context{allow_methods=Methods1
+								,req_verb=Verb
+							       }};
+			false ->
+			    Context1 = crossbar_util:response(error, "method not allowed", 405, Context),
+			    {Content, Req3} = v1_util:create_resp_content(Req3, Context1),
+			    {ok, Req4} = cowboy_http_req:set_resp_body(Content, Req3),
+			    {Methods1, Req4, Context1#cb_context{allow_methods=Methods1
+								 ,req_verb=Verb
+								}}
+		    end
             end
     end.
 
@@ -176,11 +196,17 @@ valid_content_headers(Req, Context) ->
     {true, Req, Context}.
 
 -spec known_content_type/2 :: (#http_req{}, #cb_context{}) -> {boolean(), #http_req{}, #cb_context{}}.
+known_content_type(Req, #cb_context{req_verb = <<"options">>}=Context) ->
+    {true, Req, Context};
+known_content_type(Req, #cb_context{req_verb = <<"get">>}=Context) ->
+    {true, Req, Context};
+known_content_type(Req, #cb_context{req_verb = <<"delete">>}=Context) ->
+    {true, Req, Context};
 known_content_type(Req, Context) ->
     {ok, Req2} = case cowboy_http_req:header('Content-Type', Req) of
                      {undefined, Req1} ->
                          cowboy_http_req:set_resp_header(<<"X-RFC2616">>
-                                                             ,<<"§14.17 (Try it, you'll like it)">>
+                                                             ,<<"Section 14.17 (Try it, you'll like it)">>
                                                              ,Req1);
                      {_, Req1} -> {ok, Req1}
                  end,

@@ -9,10 +9,12 @@
 
 -behaviour(supervisor).
 
--include_lib("whistle_couch/include/wh_couch.hrl").
+-include_lib("wh_couch.hrl").
 
--export([start_link/0]).
--export([init/1]).
+-export([start_link/0
+         ,init/1
+         ,compactor_pid/0
+        ]).
 
 -define(CHILD(Name, Type), fun(N, cache) -> {N, {wh_cache, start_link, [N]}, permanent, 5000, worker, [wh_cache]};
                               (N, T) -> {N, {N, start_link, []}, permanent, 5000, T, [N]} end(Name, Type)).
@@ -37,6 +39,11 @@
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
+-spec compactor_pid/0 :: () -> pid() | 'undefined'.
+compactor_pid() ->
+    [Pid] =  [P || {couch_compactor, P, worker, _} <- supervisor:which_children(whistle_couch_sup)],
+    Pid.
+
 %% ===================================================================
 %% Supervisor callbacks
 %% ===================================================================
@@ -52,6 +59,7 @@ start_link() ->
 %%--------------------------------------------------------------------
 -spec init([]) -> sup_init_ret().
 init([]) ->
+    _ = whistle_couch:start_deps(),
     RestartStrategy = one_for_one,
     MaxRestarts = 5,
     MaxSecondsBetweenRestarts = 10,

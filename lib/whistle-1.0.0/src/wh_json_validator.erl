@@ -58,7 +58,7 @@
 -spec is_valid/2 :: (wh_json:json_object(), ne_binary() | wh_json:json_object()) -> pass() | fail().
 is_valid(JObj, Schema) when is_binary(Schema) ->
     %% TODO: cache the schema?
-    case couch_mgr:open_doc(?WH_SCHEMA_DB, Schema) of
+    case couch_mgr:open_cache_doc(?WH_SCHEMA_DB, Schema) of
         {ok, SchemaJObj} ->
             is_valid(JObj, SchemaJObj);
         {error, R} ->
@@ -72,8 +72,7 @@ is_valid(JObj, Schema) ->
             Ok;
         {fail, Errors} ->
             E = format_errors(Errors),
-            lager:debug("json failed validation against ~s schema: ~s", [wh_json:get_value(<<"_id">>, Schema)
-                                                                  ,list_to_binary(wh_json:encode(E))]),
+            lager:debug("json failed validation against ~s schema: ~s", [wh_json:get_value(<<"_id">>, Schema), wh_json:encode(E)]),
             {fail, E}
     end.
 
@@ -87,7 +86,7 @@ format_errors(Errors) ->
 format_errors([], JObj) ->
     JObj;
 format_errors([{K, V}|T], JObj) when is_list(K) ->
-    Property = wh_util:binary_join(K, <<".">>),
+    Property = wh_util:join_binary(K, <<".">>),
     [Attr, Msg] = binary:split(V, <<":">>),
     format_errors(T, wh_json:set_value([Property, Attr], Msg, JObj));
 format_errors([{Property, V}|T], JObj) ->

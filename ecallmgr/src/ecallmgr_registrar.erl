@@ -32,16 +32,18 @@ reg_success(Props, Node) ->
 
 -spec lookup_contact/2 :: (ne_binary(), ne_binary()) -> {'ok', ne_binary()} | {'error', 'timeout'}.
 lookup_contact(Realm, Username) ->
-    case wh_cache:fetch_local(?ECALLMGR_REG_CACHE, ?CONTACT_KEY(Realm, Username)) of
+    case wh_cache:peek_local(?ECALLMGR_REG_CACHE, ?CONTACT_KEY(Realm, Username)) of
         {ok, Contact} -> {ok, Contact};
         {error, not_found} -> 
             case lookup(Realm, Username, [<<"Contact">>]) of
                 [{<<"Contact">>, Contact}] -> {ok, Contact};
-                {error, _}=E -> E
+                {error, _R}=E -> 
+                    lager:notice("failed to find registration for ~s@~s: ~p", [Username, Realm, _R]),
+                    E
             end
     end.
 
--spec endpoint_node/2 :: (ne_binary(), ne_binary()) -> {'ok', ne_binary()} | {'error', 'not_found'}.
+-spec endpoint_node/2 :: (ne_binary(), ne_binary()) -> {'ok', atom()} | {'error', 'not_found'}.
 endpoint_node(Realm, Username) ->
     wh_cache:fetch_local(?ECALLMGR_REG_CACHE, ?NODE_KEY(Realm, Username)).    
 

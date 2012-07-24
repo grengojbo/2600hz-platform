@@ -11,8 +11,21 @@
 -define(ECALLMGR_REG_CACHE, ecallmgr_reg_cache).
 -define(ECALLMGR_CALL_CACHE, ecallmgr_call_cache).
 
--type fs_api_ret() :: {'ok', binary()} | {'error', binary()} | 'timeout'.
--type fs_sendmsg_ret() :: 'ok' | {'error', binary()} | 'timeout'.
+-type fs_api_ret()       :: {'ok', binary()} |
+                            {'error', 'badarg'} |
+                            'timeout'.
+-type fs_sendmsg_ret()   :: 'ok' |
+                            {'error', 'badarg' | 'badmem' | 'nosession'} |
+                            'timeout'.
+-type fs_sendevent_ret() :: 'ok' |
+                            {'error', 'badarg' | 'badmem'} |
+                            'timeout'.
+-type fs_bind_ret()      :: 'ok' |
+                            {'error', 'badarg' | 'badmem'} |
+                            'timeout'.
+-type fs_handlecall_ret() :: 'ok' |
+                             {'error', 'badarg' | 'session_attach_failed' | 'badsession' | 'baduuid'} |
+                             'timeout'.
 
 -record(sip_subscription, {key=undefined
                            ,to=undefined
@@ -42,12 +55,14 @@
                   ,node = '_'
                   ,timestamp = '_'
                  }).
+-type channel() :: #channel{}.
+-type channels() :: [channel(),...] | [].
 
 -define(DEFAULT_DOMAIN, <<"whistle.2600hz.org">>).
 -define(MAX_TIMEOUT_FOR_NODE_RESTART, 10000). % 10 seconds
 
 %% list of dialplan Application-Names that can execute after a call has hung up
--define(POST_HANGUP_COMMANDS, [<<"store">>, <<"set">>, <<"presence">>, <<"record">>]). 
+-define(POST_HANGUP_COMMANDS, [<<"store">>, <<"set">>, <<"presence">>, <<"record">>, <<"store_fax">>]). 
 
 -define(SANITY_CHECK_PERIOD, 300000).
 
@@ -130,6 +145,7 @@
                                ,{<<"answer">>, <<"answer">>}
                                ,{<<"pre_answer">>, <<"progress">>}
                                ,{<<"ring_ready">>, <<"ring">>}
+                               ,{<<"rxfax">>, <<"receive_fax">>}
                                ,{<<"tone_detect">>, <<"tone_detect">>}
                                ,{<<"play_and_get_digits">>, <<"play_and_collect_digits">>}
                                ,{<<"respond">>, <<"respond">>}
@@ -148,7 +164,7 @@
                         ,<<"DETECTED_TONE">>, <<"DTMF">>, <<"CALL_UPDATE">>, <<"CHANNEL_CREATE">>
                         ,<<"RECORD_START">>, <<"RECORD_STOP">>
                         ,<<"CHANNEL_DESTROY">>, <<"CHANNEL_EXECUTE_ERROR">>, <<"CHANNEL_PROGRESS_MEDIA">>
-                        ,<<"CHANNEL_ANSWER">>
+                        ,<<"CHANNEL_ANSWER">>, <<"CHANNEL_PARK">>
                    ]).
 
 -define(FS_DEFAULT_HDRS, [<<"Event-Name">>, <<"Core-UUID">>, <<"FreeSWITCH-Hostname">>, <<"FreeSWITCH-Switchname">>

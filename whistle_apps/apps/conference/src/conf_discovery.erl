@@ -106,16 +106,25 @@ handle_discovery_req(JObj, Props) ->
                          C
                  end
                ],
-    Conference = whapps_conference:update(Updaters, whapps_conference:new()),
+    try whapps_conference:update(Updaters, whapps_conference:new()) of
+        Conference -> search_for_conference(Call, Conference, Srv)
+    catch
+        _:_E ->
+            lager:debug("failed to update conference record: ~p", [_E]),
+            whapps_call_command:hangup(Call)
+    end.
+
+-spec search_for_conference/3 :: (whapps_call:call(), whapps_conference:conference(), pid()) -> any().
+search_for_conference(Call, Conference, Srv) ->
     conf_participant:set_conference(Conference, Srv),
     SearchId = couch_mgr:get_uuid(),
     wh_cache:store_local(?CONFERENCE_CACHE, {?MODULE, discovery, SearchId}, Srv, 300),
     lager:debug("publishing conference search request ~s", [SearchId]),
     whapps_conference_command:search(SearchId, Conference),
-    whapps_call_command:prompt(<<"conf-joining_conference">>, Call), 
+    whapps_call_command:prompt(<<"conf-joining_conference">>, Call).
+
     %% TODO: send discovery event on error
     %%    {ok, DiscoveryReq} = conf_participant:discovery_event(Srv),
-    ok.
 
 -spec handle_search_error/2 :: (wh_json:json_object(), proplist()) -> ok.
 handle_search_error(JObj, _Props) ->
@@ -130,10 +139,9 @@ handle_search_error(JObj, _Props) ->
     {ok, Conference} = conf_participant:conference(Srv),
     {ok, Call} = conf_participant:call(Srv),
     put(callid, whapps_call:call_id(Call)),
-    conf_participant:consume_call_events(Srv),
-    
-    {ok, Status} = whapps_call_command:b_channel_status(Call),        
-    SwitchHostname = wh_json:get_value(<<"Switch-Hostname">>, Status),
+
+    lager:debug("participant switch nodename ~p", [whapps_call:switch_nodename(Call)]),
+    [_, SwitchHostname] = binary:split(whapps_call:switch_nodename(Call), <<"@">>),
     case negotiate_focus(SwitchHostname, Conference, Call) of
         {ok, _} -> 
             lager:debug("conference is not currently running but our update was accepted, starting on ~s", [SwitchHostname]),
@@ -161,9 +169,8 @@ handle_search_resp(JObj, _Props) ->
     {ok, Call} = conf_participant:call(Srv),
     put(callid, whapps_call:call_id(Call)),
 
-    conf_participant:consume_call_events(Srv),
-    {ok, Status} = whapps_call_command:b_channel_status(Call),        
-    SwitchHostname = wh_json:get_value(<<"Switch-Hostname">>, Status),
+    lager:debug("participant switch nodename ~p", [whapps_call:switch_nodename(Call)]),
+    [_, SwitchHostname] = binary:split(whapps_call:switch_nodename(Call), <<"@">>),
     case wh_json:get_value(<<"Switch-Hostname">>, JObj) of
         SwitchHostname -> 
             lager:debug("running conference is on the same switch, joining on ~s", [SwitchHostname]),
@@ -345,7 +352,12 @@ validate_conference_pin(Conference, Call) ->
                     validate_conference_pin(false, Conference, Call, 1)
             end;
         _Else ->
-            validate_conference_pin(undefined, Conference, Call, 1)            
+            case wh_util:is_empty(whapps_conference:moderator_pins(Conference))
+                andalso wh_util:is_empty(whapps_conference:member_pins(Conference))
+            of
+                true -> {ok, whapps_conference:set_moderator(false, Conference)};
+                false -> validate_conference_pin(undefined, Conference, Call, 1)
+            end
     end.
 
 validate_conference_pin(_, _, Call, Loop) when Loop > 3->
@@ -358,7 +370,9 @@ validate_conference_pin(true, Conference, Call, Loop) ->
         {error, _}=E -> E;
         {ok, Digits} ->
             Pins = whapps_conference:moderator_pins(Conference),
-            case lists:member(Digits, Pins) of
+            case lists:member(Digits, Pins) 
+                orelse (Pins =:= [] andalso Digits =:= <<>>) 
+            of
                 true ->            
                     lager:debug("caller entered a valid moderator pin"),
                     {ok, Conference};
@@ -374,7 +388,9 @@ validate_conference_pin(false, Conference, Call, Loop) ->
         {error, _}=E -> E;
         {ok, Digits} ->
             Pins = whapps_conference:member_pins(Conference),
-            case lists:member(Digits, Pins) of
+            case lists:member(Digits, Pins) 
+                orelse (Pins =:= [] andalso Digits =:= <<>>) 
+            of
                 true ->            
                     lager:debug("caller entered a valid member pin"),
                     {ok, Conference};
@@ -391,7 +407,11 @@ validate_conference_pin(_, Conference, Call, Loop) ->
         {ok, Digits} ->
             MemberPins = whapps_conference:member_pins(Conference),
             ModeratorPins = whapps_conference:moderator_pins(Conference),
-            case {lists:member(Digits, MemberPins), lists:member(Digits, ModeratorPins)} of
+            case {(lists:member(Digits, MemberPins)
+                   orelse (MemberPins =:= [] andalso Digits =:= <<>>))
+                  ,(lists:member(Digits, ModeratorPins)
+                    orelse (MemberPins =:= [] andalso Digits =:= <<>>))}
+            of
                 {true, _} ->
                     lager:debug("caller entered a pin belonging to a member"),
                     {ok, whapps_conference:set_moderator(false, Conference)};

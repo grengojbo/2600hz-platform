@@ -86,7 +86,10 @@ onnet_data(State) ->
                        ]
                end,
 
-    DIDFlags = wh_json:get_value(<<"options">>, DIDOptions, []),
+    DIDFlags = ts_util:offnet_flags([wh_json:get_value(<<"DID_Opts">>, DIDOptions)
+                                     ,wh_json:get_value(<<"flags">>, SrvOptions)
+                                     ,wh_json:get_value(<<"flags">>, AcctOptions)
+                                    ]),
 
     Q = ts_callflow:get_my_queue(State),
 
@@ -115,8 +118,9 @@ onnet_data(State) ->
         send_park(State, Command)
     catch
         _A:_B ->
-            lager:debug("Exception ~p:~p", [_A, _B]),
-            lager:debug("Stacktrace: ~p", [erlang:get_stacktrace()]),
+            ST = erlang:get_stacktrace(),
+            lager:debug("exception ~p:~p", [_A, _B]),
+            _ = [lager:debug("st: ~p", [S]) || S <- ST],
             wait_for_cdr(State)
     end.
 

@@ -10,15 +10,31 @@
 %%%-------------------------------------------------------------------
 -module(props).
 
--export([get_value/2, get_value/3, delete/2, is_defined/2]).
--export([get_integer_value/2, get_integer_value/3]).
--export([get_is_true/2, get_is_true/3
+-export([get_value/2, get_value/3
+         ,delete/2, is_defined/2
+         ,get_integer_value/2, get_integer_value/3
+         ,get_is_true/2, get_is_true/3
          ,get_is_false/2, get_is_false/3
+         ,get_keys/1
+         ,unique/1
+         ,filter/2
+         ,filter_empty/1
+         ,filter_undefined/1
         ]).
--export([get_keys/1]).
--export([unique/1]).
 
 -include_lib("whistle/include/wh_types.hrl").
+
+-spec filter/2 :: (fun(({wh_proplist_key(), wh_proplist_value()}) -> boolean()), wh_proplist()) -> wh_proplist().
+filter(Fun, Prop) when is_function(Fun, 1), is_list(Prop) ->
+    lists:filter(Fun, Prop).
+
+filter_empty(Prop) ->
+    [KV || {_, V}=KV <- Prop, (not wh_util:is_empty(V))].
+
+
+-spec filter_undefined/1 :: (proplist()) -> proplist().
+filter_undefined(Prop) ->
+    [KV || {_, V}=KV <- Prop, V =/= undefined].
 
 -spec get_value/2 :: (wh_proplist_key(), wh_proplist()) -> term().
 -spec get_value/3 :: (wh_proplist_key(), wh_proplist(), Default) -> Default | term().
@@ -96,6 +112,22 @@ unique([{Key, _}=H|T], Uniques) ->
 
 -include_lib("eunit/include/eunit.hrl").
 -ifdef(TEST).
+
+filter_test() ->
+    Fun = fun({_, V}) -> V < 5 end,
+    ?assertEqual([], filter(Fun, [])),
+    ?assertEqual([], filter(Fun, [{a, 10}, {b, 8}, {c, 6}])),
+    ?assertEqual([{z, 1}], filter(Fun, [{a, 10}, {b, 8}, {c, 6}, {z, 1}])).
+
+filter_empty_test() ->
+    ?assertEqual([], filter_empty([])),
+    ?assertEqual([{a, 10}, {b, 8}, {c, 6}], filter_empty([{a, 10}, {b, 8}, {c, 6}])),
+    ?assertEqual([], filter_empty([{a, 0}, {b, []}, {c, <<>>}, {z, undefined}])).
+
+filter_undefined_test() ->
+    ?assertEqual([], filter_undefined([])),
+    ?assertEqual([{a, 10}, {b, 8}, {c, 6}], filter_undefined([{a, 10}, {b, 8}, {c, 6}])),
+    ?assertEqual([{a, 0}, {b, []}, {c, <<>>}], filter_undefined([{a, 0}, {b, []}, {c, <<>>}, {z, undefined}])).
 
 unique_test() ->
     L = [{a, b}, {a, b}, {a, c}, {b,c}, {b,d}],

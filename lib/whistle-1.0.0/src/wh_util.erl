@@ -1,3 +1,12 @@
+%%%-------------------------------------------------------------------
+%%% @copyright (C) 2010-2012, VoIP INC
+%%% @doc
+%%% Various utilities - a veritable cornicopia
+%%% @end
+%%% @contributors
+%%%   James Aimonetti
+%%%   Karl Anderson
+%%%-------------------------------------------------------------------
 -module(wh_util).
 
 -export([format_account_id/1, format_account_id/2]).
@@ -14,7 +23,7 @@
          ,to_atom/1, to_atom/2
         ]).
 -export([to_boolean/1, is_true/1, is_false/1, is_empty/1, is_proplist/1]).
--export([to_lower_binary/1, to_upper_binary/1, binary_join/2]).
+-export([to_lower_binary/1, to_upper_binary/1]).
 -export([to_lower_string/1, to_upper_string/1]).
 -export([ucfirst_binary/1, lcfirst_binary/1]).
 
@@ -117,7 +126,7 @@ is_in_account_hierarchy(CheckFor, InAccount, IncludeSelf) ->
     CheckId = wh_util:format_account_id(CheckFor, raw),
     AccountId = wh_util:format_account_id(InAccount, raw),
     AccountDb = wh_util:format_account_id(InAccount, encoded),
-    case (IncludeSelf andalso AccountId =:= CheckId) orelse crossbar_util:open_doc(AccountDb, AccountId) of
+    case (IncludeSelf andalso AccountId =:= CheckId) orelse couch_mgr:open_cache_doc(AccountDb, AccountId) of
         true ->
             lager:debug("account ~s is the same as the account to fetch the hierarchy from", [CheckId]),
             true;
@@ -147,7 +156,7 @@ is_system_admin(undefined) -> false;
 is_system_admin(Account) -> 
     AccountId = wh_util:format_account_id(Account, raw),
     AccountDb = wh_util:format_account_id(Account, encoded),
-    case couch_mgr:open_doc(AccountDb, AccountId) of
+    case couch_mgr:open_cache_doc(AccountDb, AccountId) of
         {ok, JObj} -> wh_json:is_true(<<"pvt_superduper_admin">>, JObj);
         {error, _R} ->
             lager:debug("unable to open account definition for ~s: ~p", [Account, _R]),
@@ -193,16 +202,18 @@ is_account_enabled(AccountId) ->
 %% Retrieves the account realm
 %% @end
 %%--------------------------------------------------------------------
--spec get_account_realm/1 :: (undefined | ne_binary()) -> undefined | ne_binary().
--spec get_account_realm/2 :: (undefined | ne_binary(), ne_binary()) -> undefined | ne_binary().
-
+-spec get_account_realm/1 :: ('undefined' | ne_binary()) -> 'undefined' | ne_binary().
+-spec get_account_realm/2 :: ('undefined' | ne_binary(), ne_binary()) -> 'undefined' | ne_binary().
 get_account_realm(AccountId) ->
-    get_account_realm(wh_util:format_account_id(AccountId, encoded), AccountId).
+    get_account_realm(
+      wh_util:format_account_id(AccountId, encoded)
+      ,wh_util:format_account_id(AccountId, raw)
+     ).
 
 get_account_realm(undefined, _) ->
     undefined;
 get_account_realm(Db, AccountId) ->
-    case couch_mgr:open_doc(Db, AccountId) of
+    case couch_mgr:open_cache_doc(Db, AccountId) of
         {ok, JObj} ->
             wh_json:get_ne_value(<<"realm">>, JObj);
         {error, R} ->
@@ -240,22 +251,30 @@ pad_binary(Bin, _, _) ->
 %% @public
 %% @doc
 %% Join a binary together with a seperator.
+%% Changed to Accumulator from the binary-contruction for speed reasons:
+%%
+%% Bins = [to_binary(N) || N <- lists:seq(1,10000)]
+%% Old join_binary(Bins): 171.1ms fastest, 221.9ms slowest
+%% New join_binary(Bins):   1.1ms fastest,   2.6ms slowest
+%% Obvious winner
+%%
 %% @end
 %%--------------------------------------------------------------------
 -spec join_binary/1 :: ([binary(),...]) -> binary().
 -spec join_binary/2 :: ([binary(),...], binary()) -> binary().
 
 join_binary(Bins) ->
-    join_binary(Bins, <<", ">>).
+    join_binary(Bins, <<", ">>, []).
+join_binary(Bins, Sep) ->
+    join_binary(Bins, Sep, []).
 
-join_binary([], _) ->
-    <<>>;
-join_binary([Bin], _) ->
-    Bin;
-join_binary([Bin|Rest], Sep) when is_binary(Bin) ->
-    <<Bin/binary, Sep/binary, (join_binary(Rest, Sep))/binary>>;
-join_binary([_|Rest], Sep) ->
-    join_binary(Rest, Sep).
+join_binary([], _, Acc) -> iolist_to_binary(lists:reverse(Acc));
+join_binary([Bin], _, Acc) when is_binary(Bin) ->
+    iolist_to_binary(lists:reverse([Bin | Acc]));
+join_binary([Bin|Bins], Sep, Acc) when is_binary(Bin) ->
+    join_binary(Bins, Sep, [Sep, Bin |Acc]);
+join_binary([_|Bins], Sep, Acc) ->
+    join_binary(Bins, Sep, Acc).
 
 %%--------------------------------------------------------------------
 %% @public
@@ -264,7 +283,9 @@ join_binary([_|Rest], Sep) ->
 %% dictionary, failing that the Msg-ID and finally a generic
 %% @end
 %%--------------------------------------------------------------------
--spec put_callid/1 :: (wh_json:json_object() | wh_proplist()) -> ne_binary() | 'undefined'.
+-spec put_callid/1 :: (wh_json:json_object() | wh_proplist() | ne_binary()) -> ne_binary() | 'undefined'.
+put_callid(?NE_BINARY = CallId) ->
+    erlang:put(callid, CallId);
 put_callid(Prop) when is_list(Prop) ->
     erlang:put(callid, props:get_value(<<"Call-ID">>, Prop, props:get_value(<<"Msg-ID">>, Prop, ?LOG_SYSTEM_ID)));
 put_callid(JObj) ->
@@ -288,13 +309,15 @@ get_event_type(JObj) when not is_list(JObj) -> % guard against json_objects() be
 %% @end
 %%--------------------------------------------------------------------
 -spec get_xml_value/2 :: (string(), term()) -> undefined | binary().    
-get_xml_value(Path, Xml) ->
+get_xml_value(Paths, Xml) ->
+    Path = lists:flatten(Paths),
     try xmerl_xpath:string(Path, Xml) of
         [#xmlText{value=Value}] ->
             wh_util:to_binary(Value);
         [#xmlText{}|_]=Values ->
             [wh_util:to_binary(Value) 
-             || #xmlText{value=Value} <- Values];
+             || #xmlText{value=Value} <- Values
+            ];
         _ -> undefined
     catch
         E:R ->
@@ -419,7 +442,8 @@ to_atom(X) -> to_atom(to_list(X)).
 to_atom(X, _) when is_atom(X) -> X;
 to_atom(X, true) when is_list(X) -> list_to_atom(X);
 to_atom(X, true) -> to_atom(to_list(X), true);
-to_atom(X, SafeList) ->
+to_atom(X, false) -> to_atom(X);
+to_atom(X, SafeList) when is_list(SafeList) ->
     to_atom(to_list(X), lists:member(X, SafeList)).
 
 -spec to_boolean/1 :: (binary() | string() | atom()) -> boolean().
@@ -519,10 +543,6 @@ to_upper_char(C) when is_integer(C), $a =< C, C =< $z -> C - 32;
 to_upper_char(C) when is_integer(C), 16#E0 =< C, C =< 16#F6 -> C - 32;
 to_upper_char(C) when is_integer(C), 16#F8 =< C, C =< 16#FE -> C - 32;
 to_upper_char(C) -> C.
-
--spec binary_join/2 :: ([ne_binary(),...], binary()) -> ne_binary().
-binary_join([H|T], Glue) when is_binary(Glue) ->
-    list_to_binary([H, [ [Glue, I] || I <- T]]).
 
 -spec a1hash/3 :: (ne_binary(), ne_binary(), ne_binary()) -> nonempty_string().
 a1hash(User, Realm, Password) ->
@@ -706,10 +726,10 @@ microsecs_to_secs_test() ->
 no_whistle_version_test() ->
     ?assertEqual(<<"not available">>, whistle_version(<<"/path/to/nonexistent/file">>)).
 
-binary_join_test() ->
-    ?assertEqual(<<"foo">>, binary_join([<<"foo">>], <<", ">>)),
-    ?assertEqual(<<"foo, bar">>, binary_join([<<"foo">>, <<"bar">>], <<", ">>)),
-    ?assertEqual(<<"foo, bar, baz">>, binary_join([<<"foo">>, <<"bar">>, <<"baz">>], <<", ">>)).
+join_binary_test() ->
+    ?assertEqual(<<"foo">>, join_binary([<<"foo">>], <<", ">>)),
+    ?assertEqual(<<"foo, bar">>, join_binary([<<"foo">>, <<"bar">>], <<", ">>)),
+    ?assertEqual(<<"foo, bar, baz">>, join_binary([<<"foo">>, <<"bar">>, <<"baz">>], <<", ">>)).
 
 ucfirst_binary_test() ->
     ?assertEqual(<<"Foo">>, ucfirst_binary(<<"foo">>)),
@@ -754,5 +774,21 @@ to_upper_string_test() ->
     ?assertEqual("FOO", to_upper_string("FoO")),
     ?assertEqual("F00", to_upper_string("f00")),
     ?assertEqual("F00", to_upper_string("F00")).
+
+to_boolean_test() ->
+    All = [<<"true">>, "true", true, <<"false">>, "false", false],
+    NotAll = [0, 123, 1.23, "123", "abc", abc, <<"abc">>, <<"123">>, {what, is, this, doing, here}],
+    ?assertEqual(true, lists:all(fun(X) ->
+                                         try to_boolean(X) of
+                                             _ -> true
+                                         catch _:_ -> false
+                                         end
+                                 end, All)),
+    ?assertEqual(true, lists:all(fun(X) ->
+                                         try to_boolean(X) of
+                                             _ -> false
+                                         catch _:_ -> true
+                                         end
+                                 end, NotAll)).
 
 -endif.

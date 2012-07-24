@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2011, VoIP INC
+%%% @copyright (C) 2011-2012, VoIP INC
 %%% @doc
 %%%
 %%% @end
@@ -23,11 +23,11 @@
 lookup_number(Number) ->
     Num = wnm_util:normalize_number(Number),
     case wh_cache:fetch_local(?STEPSWITCH_CACHE, cache_key_number(Number)) of
-        {ok, {AccountId, ForceOut}} -> {ok, AccountId, ForceOut};
+        {ok, {AccountId, ForceOut, Ported}} -> {ok, AccountId, ForceOut, Ported};
         {error, not_found} ->
             case wh_number_manager:lookup_account_by_number(Num) of
-                {ok, AccountId, ForceOut}=Ok ->
-                    wh_cache:store_local(?STEPSWITCH_CACHE, cache_key_number(Number), {AccountId, ForceOut}),
+                {ok, AccountId, ForceOut, Ported}=Ok ->
+                    wh_cache:store_local(?STEPSWITCH_CACHE, cache_key_number(Number), {AccountId, ForceOut, Ported}),
                     lager:debug("~s is associated with account ~s", [Num, AccountId]),            
                     Ok;
                 {error, Reason}=E ->
@@ -128,7 +128,8 @@ get_endpoint(Number, #resrc{weight_cost=WC, gateways=Gtws, rules=Rules
 %% number.  In the event that no rules match then return an error.
 %% @end
 %%--------------------------------------------------------------------
--spec evaluate_rules/2 :: (re:mp(), ne_binary()) -> {'ok', ne_binary()} | {'error', 'no_match'}.
+-spec evaluate_rules/2 :: (re:mp(), ne_binary()) -> {'ok', ne_binary()} |
+                                                    {'error', 'no_match'}.
 evaluate_rules([], _) ->
     {error, no_match};
 evaluate_rules([Regex|T], Number) ->
@@ -150,6 +151,6 @@ evaluate_rules([Regex|T], Number) ->
 %% 
 %% @end
 %%--------------------------------------------------------------------
--spec cache_key_number/1 :: (ne_binary()) -> {stepswitch_number, ne_binary()}.
+-spec cache_key_number/1 :: (ne_binary()) -> {'stepswitch_number', ne_binary()}.
 cache_key_number(Number) ->
     {stepswitch_number, Number}.

@@ -6,6 +6,7 @@
 %%% @contributors
 %%%   Karl Anderson
 %%%   James Aimonetti
+%%%   Jon Blanton
 %%%-------------------------------------------------------------------
 -module(crossbar).
 
@@ -41,29 +42,62 @@ start_link() ->
                           ,cowboy_tcp_transport, [{port, Port}]
                           ,cowboy_http_protocol, [{dispatch, Dispatch}
                                                   ,{timeout, ReqTimeout}
+						  ,{onrequest, fun on_request/1}
+						  ,{onresponse, fun on_response/3}
                                                  ]
                          ),
 
-    case whapps_config:get_is_true(?CONFIG_CAT, <<"ssl">>, false) of
+    case whapps_config:get_is_true(?CONFIG_CAT, <<"use_ssl">>, false) of
         false -> ok;
         true ->
-            SSLPort = whapps_config:get_integer(?CONFIG_CAT, <<"ssl_port">>, 8443),
-            SSLCert = whapps_config:get_string(?CONFIG_CAT, <<"ssl_cert">>, "priv/ssl/cert.pem"),
-            SSLKey = whapps_config:get_string(?CONFIG_CAT, <<"ssl_key">>, "priv/ssl/key.pem"),
-            SSLPassword = whapps_config:get_string(?CONFIG_CAT, <<"ssl_password">>, "2600hz"),
+            RootDir = code:lib_dir(crossbar),
 
-            cowboy:start_listener(v1_resource_ssl, 100
-                                  ,cowboy_ssl_transport, [
-                                                          {port, SSLPort}
-                                                          ,{certfile, SSLCert}
-                                                          ,{keyfile, SSLKey}
-                                                          ,{password, SSLPassword}
-                                                         ]
-                                  ,cowboy_http_protocol, [{dispatch, Dispatch}]
-                                 )
+            try
+                SSLCert = whapps_config:get_string(?CONFIG_CAT
+                                                   ,<<"ssl_cert">>
+                                                       ,filename:join([RootDir, <<"priv/ssl/crossbar.crt">>])
+                                                  ),
+                SSLKey = whapps_config:get_string(?CONFIG_CAT
+                                                  ,<<"ssl_key">>
+                                                      ,filename:join([RootDir, <<"priv/ssl/crossbar.key">>])
+                                                 ),
+
+                SSLPort = whapps_config:get_integer(?CONFIG_CAT, <<"ssl_port">>, 8443),
+                SSLPassword = whapps_config:get_string(?CONFIG_CAT, <<"ssl_password">>, <<>>),
+
+                cowboy:start_listener(v1_resource_ssl, 100
+                                      ,cowboy_ssl_transport, [
+                                                              {port, SSLPort}
+                                                              ,{certfile, find_file(SSLCert, RootDir)}
+                                                              ,{keyfile, find_file(SSLKey, RootDir)}
+                                                              ,{password, SSLPassword}
+                                                             ]
+                                      ,cowboy_http_protocol, [{dispatch, Dispatch}
+							      ,{onrequest, fun on_request/1}
+							      ,{onresponse, fun on_response/3}
+							     ]
+                                     )
+            catch
+                throw:{invalid_file, _File} ->
+                    lager:info("SSL disabled: failed to find ~s (tried prepending ~s too)", [_File, RootDir])
+            end
     end,
 
     crossbar_sup:start_link().
+
+find_file(File, Root) ->
+    case filelib:is_file(File) of
+        true -> File;
+        false ->
+            FromRoot = filename:join([Root, File]),
+            lager:info("failed to find file at ~s, trying ~s", [File, FromRoot]),
+            case filelib:is_file(FromRoot) of
+                true -> FromRoot;
+                false ->
+                    lager:info("failed to find file at ~s", [FromRoot]),
+                    throw({invalid_file, File})
+            end
+    end.
 
 %%--------------------------------------------------------------------
 %% @public
@@ -116,3 +150,33 @@ start_deps() ->
     whistle_apps_deps:ensure(?MODULE), % if started by the whistle_controller, this will exist
     _ = [ wh_util:ensure_started(App) || App <- [sasl, crypto, inets, cowboy, whistle_amqp]],
     ok.
+
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Functions for onrequest and onresponse callbacks
+%% @end
+%%--------------------------------------------------------------------
+-spec on_request/1 :: (#http_req{}) -> #http_req{}.
+on_request(Req0) ->
+    {Method, Req1} = cowboy_http_req:method(Req0),
+    case Method of
+	'OPTIONS' ->
+	    Req1;
+	_ ->
+	    wh_counter:inc(<<"crossbar.requests.methods.", (wh_util:to_upper_binary(Method))/binary>>),
+	    Req1
+    end.
+
+-spec on_response/3 :: (cowboy_http:status(), cowboy_http:headers(), #http_req{}) -> #http_req{}.
+on_response(Status, _Headers, Req0) ->
+    {Method, Req1} = cowboy_http_req:method(Req0),
+    case Method of
+        'OPTIONS' ->
+	    Req1;
+	_ ->
+	    wh_counter:inc(<<"crossbar.responses.", (wh_util:to_binary(Status))/binary>>),
+	    Req1
+    end.
+    

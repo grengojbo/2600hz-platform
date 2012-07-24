@@ -20,7 +20,8 @@
 -module(wh_api).
 
 %% API
--export([default_headers/2
+-export([default_headers_v/1
+         ,default_headers/2
          ,default_headers/3
          ,default_headers/4
          ,default_headers/5
@@ -54,6 +55,8 @@
 %% All fields are required general headers.
 %% @end
 %%--------------------------------------------------------------------
+-spec default_headers_v/1 :: (api_terms()) -> boolean().
+
 -spec default_headers/2 :: (ne_binary(), ne_binary()) -> proplist().
 -spec default_headers/3 :: (binary(), ne_binary(), ne_binary()) -> proplist().
 -spec default_headers/4 :: (ne_binary(), ne_binary(), ne_binary(), ne_binary()) -> proplist().
@@ -80,6 +83,14 @@ default_headers(ServerID, EvtCat, EvtName, AppName, AppVsn) ->
      ,{<<"App-Version">>, AppVsn}
      ,{<<"Node">>, wh_util:to_binary(node())}
     ].
+
+default_headers_v(Prop) ->
+    props:get_value(<<"Server-ID">>, Prop) =/= undefined
+        andalso (not wh_util:is_empty(props:get_value(<<"Event-Category">>, Prop)))
+        andalso (not wh_util:is_empty(props:get_value(<<"Event-Name">>, Prop)))
+        andalso (not wh_util:is_empty(props:get_value(<<"App-Name">>, Prop)))
+        andalso (not wh_util:is_empty(props:get_value(<<"App-Version">>, Prop)))
+        andalso (not wh_util:is_empty(props:get_value(<<"Node">>, Prop))).
 
 disambiguate_and_publish(ReqJObj, RespJObj, Binding) ->
     Wapi = list_to_binary([<<"wapi_">>, wh_util:to_binary(Binding)]),
@@ -211,7 +222,7 @@ validate(Prop, ReqH, Vals, Types) when is_list(Prop) ->
         true ->
             true;
         false ->
-            lager:debug("failing API JSON: ~s", [list_to_binary(wh_json:encode(wh_json:from_list(Prop)))]),
+            lager:debug("failing API JSON: ~s", [wh_json:encode(wh_json:from_list(Prop))]),
             false
     end;
 validate(JObj, ReqH, Vals, Types) ->
@@ -230,7 +241,7 @@ build_message(Prop, ReqH, OptH) when is_list(Prop) ->
     case defaults(Prop) of
         {error, _Reason}=Error ->
             lager:debug("API message does not have the default headers ~s: ~p"
-                 ,[string:join([wh_util:to_list(H) || H <- ReqH], ","), Error]),
+                        ,[string:join([wh_util:to_list(H) || H <- ReqH], ","), Error]),
             Error;
         HeadAndProp ->
             case build_message_specific_headers(HeadAndProp, ReqH, OptH) of
@@ -241,15 +252,13 @@ build_message(Prop, ReqH, OptH) when is_list(Prop) ->
 build_message(JObj, ReqH, OptH) ->
     build_message(wh_json:to_proplist(JObj), ReqH, OptH).
 
--spec build_message_specific_headers/3 :: (Msg, ReqHeaders, OptHeaders) -> {'ok', proplist()} | {'error', string()} when
-      Msg :: proplist() | {api_headers(), proplist()},
-      ReqHeaders :: api_headers(),
-      OptHeaders :: api_headers().
+-spec build_message_specific_headers/3 :: (proplist() | {api_headers(), proplist()}, api_headers(), api_headers()) -> {'ok', proplist()} |
+                                                                                                                      {'error', string()}.
 build_message_specific_headers({Headers, Prop}, ReqH, OptH) ->
     case update_required_headers(Prop, ReqH, Headers) of
         {error, _Reason} = Error ->
             lager:debug("API message does not have the required headers ~s: ~p"
-                 ,[string:join([wh_util:to_list(H) || H <- ReqH], ","), Error]),
+                        ,[string:join([wh_util:to_list(H) || H <- ReqH], ","), Error]),
             Error;
         {Headers1, Prop1} ->
             {Headers2, _Prop2} = update_optional_headers(Prop1, OptH, Headers1),
@@ -266,7 +275,7 @@ build_message_specific({Headers, Prop}, ReqH, OptH) ->
     case update_required_headers(Prop, ReqH, Headers) of
         {error, _Reason} = Error ->
             lager:debug("API message does not have the required headers ~s: ~p"
-                 ,[string:join([wh_util:to_list(H) || H <- ReqH], ","), Error]),
+                        ,[string:join([wh_util:to_list(H) || H <- ReqH], ","), Error]),
             Error;
         {Headers1, Prop1} ->
             {Headers2, _Prop2} = update_optional_headers(Prop1, OptH, Headers1),
@@ -275,13 +284,12 @@ build_message_specific({Headers, Prop}, ReqH, OptH) ->
 build_message_specific(Prop, ReqH, OptH) ->
     build_message_specific({[], Prop}, ReqH, OptH).
 
--spec headers_to_json/1 :: (HeadersProp) -> api_formatter_return() when
-      HeadersProp :: proplist().
-headers_to_json(HeadersProp) ->
-    try
-        {ok, mochijson2:encode({struct, HeadersProp})}
+-spec headers_to_json/1 :: (proplist()) -> api_formatter_return().
+headers_to_json([_|_]=HeadersProp) ->
+    try wh_json:encode(wh_json:from_list(HeadersProp)) of
+        JSON -> {ok, JSON}
     catch
-        _What:_Why -> {error, io_lib:format("WHISTLE TO_JSON ERROR(~p): ~p~n~p", [_What, _Why, HeadersProp])}
+        _What:_Why -> {error, io_lib:format("WHISTLE TO_JSON ~p: ~p~n~p~n", [_What, _Why, HeadersProp])}
     end.
 
 %% Checks Prop for all default headers, throws error if one is missing
@@ -368,7 +376,7 @@ values_check(Prop, Values) ->
                                    true -> true;
                                    false ->
                                        lager:debug("API key '~s' value '~p' is not one of the values: ~p"
-                                            ,[Key, V, Vs]),
+                                                   ,[Key, V, Vs]),
                                        false
                                end
                       end;
@@ -378,7 +386,7 @@ values_check(Prop, Values) ->
                           V -> true;
                           _Val ->
                               lager:debug("API key '~s' value '~p' is not '~p'"
-                                   ,[Key, _Val, V]),
+                                          ,[Key, _Val, V]),
                               false
                       end
               end, Values).
@@ -395,8 +403,8 @@ type_check(Prop, Types) ->
                                                lager:debug("API key '~s' value '~p' failed validation fun", [Key, Value]),
                                                false
                                        end
-                                   catch 
-                                       _:R -> 
+                                   catch
+                                       _:R ->
                                            lager:debug("API key '~s' value '~p' caused validation fun exception: ~p", [Key, Value, R]),
                                            false
                                    end
@@ -412,7 +420,7 @@ has_all_test() ->
     Prop = [{<<"k1">>, <<"v1">>}
             ,{<<"k2">>, <<"v2">>}
             ,{<<"k3">>, <<"v3">>}
-            ],
+           ],
     Headers = [<<"k1">>, <<"k2">>, <<"k3">>],
     ?assertEqual(true, has_all(Prop, Headers)),
     ?assertEqual(false, has_all(Prop, [<<"k4">> | Headers])),

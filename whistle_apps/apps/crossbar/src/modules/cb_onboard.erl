@@ -12,9 +12,9 @@
 -module(cb_onboard).
 
 -export([init/0
-         ,allowed_methods/0
-         ,resource_exists/0
-         ,validate/1
+         ,allowed_methods/0, allowed_methods/2
+         ,resource_exists/0, resource_exists/2
+         ,validate/1, validate/3
          ,authorize/1
          ,authenticate/1
          ,put/1
@@ -25,6 +25,10 @@
 -define(OB_CONFIG_CAT, <<(?CONFIG_CAT)/binary, ".onboard">>).
 -define(DEFAULT_FLOW, "{\"data\": { \"id\": \"~s\" }, \"module\": \"user\", \"children\": { \"_\": { \"data\": { \"id\": \"~s\" }, \"module\": \"voicemail\", \"children\": {}}}}").
 
+% Invite defines
+-define(INVITE_API, <<"invite">>).
+-define(INVITE_DB, <<"invite_codes">>).
+
 %%%===================================================================
 %%% API
 %%%===================================================================
@@ -34,6 +38,7 @@ init() ->
     _ = crossbar_bindings:bind(<<"v1_resource.allowed_methods.onboard">>, ?MODULE, allowed_methods),
     _ = crossbar_bindings:bind(<<"v1_resource.resource_exists.onboard">>, ?MODULE, resource_exists),
     _ = crossbar_bindings:bind(<<"v1_resource.validate.onboard">>, ?MODULE, validate),
+    _ = crossbar_bindings:bind(<<"v1_resource.execute.get.onboard">>, ?MODULE, get),
     crossbar_bindings:bind(<<"v1_resource.execute.put.onboard">>, ?MODULE, put).
 
 %%--------------------------------------------------------------------
@@ -49,6 +54,9 @@ init() ->
 allowed_methods() ->
     ['PUT'].
 
+allowed_methods(?INVITE_API, _) ->
+    ['GET'].
+
 %%--------------------------------------------------------------------
 %% @public
 %% @doc
@@ -59,6 +67,9 @@ allowed_methods() ->
 %%--------------------------------------------------------------------
 -spec resource_exists/0 :: () -> 'true'.
 resource_exists() ->
+    true.
+
+resource_exists(?INVITE_API, _) ->
     true.
 
 %%--------------------------------------------------------------------
@@ -90,16 +101,44 @@ validate(#cb_context{req_data=JObj, req_verb = <<"put">>}=Context) ->
             end
     end.
 
+validate(#cb_context{req_verb = <<"get">>}=Context, ?INVITE_API, Id) ->
+    load_invite_code(Context, Id).
+
+
 authorize(#cb_context{req_nouns=[{<<"onboard">>,[]}]
                       ,req_verb = <<"put">>}) ->
+    true;
+authorize(#cb_context{req_nouns=[{<<"onboard">>,[?INVITE_API,_]}]
+                      ,req_verb = <<"get">>}) ->
     true.
 
 authenticate(#cb_context{req_nouns=[{<<"onboard">>,[]}]
-                                   ,req_verb = <<"put">>}) ->
+                         ,req_verb = <<"put">>}) ->
+    true;
+authenticate(#cb_context{req_nouns=[{<<"onboard">>,[?INVITE_API,_]}]
+                         ,req_verb = <<"get">>}) ->
     true.
 
-put(#cb_context{doc=Data}=Context) ->
-    create_response(populate_new_account(Data, Context)).
+put(#cb_context{req_data=JObj, doc=Data}=Context) ->
+    case wh_json:get_ne_value(<<"invite_code">>, JObj) of
+        undefined ->
+            crossbar_util:response(error, <<"request must contain valid invite code">>, 401, Context);
+        InviteId ->
+            case load_invite_code(Context, InviteId) of
+                #cb_context{resp_status=success, doc=Doc}=IContext ->
+                    IContext1 = save_invite_code(IContext, wh_json:set_value(<<"status">>, <<"used">>, Doc)),
+                    case populate_new_account(Data, Context) of
+                        #cb_context{account_id=undefined}=Else ->
+                            save_invite_code(IContext1, wh_json:set_value(<<"status">>, <<"unused">>, IContext1#cb_context.doc)),
+                            create_response(Else);
+                        #cb_context{account_id=AcctId}=Context1 ->
+                            save_invite_code(IContext1, wh_json:set_value(<<"used_by">>, AcctId, IContext1#cb_context.doc)),
+                            create_response(Context1)
+                    end;
+                Else ->
+                    Else
+            end
+    end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -467,21 +506,32 @@ populate_new_account(Props, _) ->
     Payload = [Context],
     case crossbar_bindings:fold(<<"v1_resource.execute.put.accounts">>, Payload) of
         #cb_context{resp_status=success, db_name=AccountDb, account_id=AccountId, doc=JObj}=Context1 ->
-            Results = populate_new_account(proplists:delete(?WH_ACCOUNTS_DB, Props), AccountDb, wh_json:new()),
-            notfy_new_account(JObj),
-            Context1#cb_context{doc=wh_json:set_value(<<"account_id">>, AccountId, Results)};
-        ErrorContext ->
+            Results = populate_new_account(prepare_props(Props), AccountDb, wh_json:new()),
+            Errors = wh_json:get_value(<<"errors">>, Results),
+            case wh_util:is_empty(Errors) of
+                true ->
+                    lager:debug("new account created ~s (~s)", [AccountId, AccountDb]),
+                    notfy_new_account(JObj),
+                    Context1#cb_context{doc=wh_json:set_value(<<"account_id">>, AccountId, Results)};
+                false ->
+                    lager:debug("account creation errors: ~s", [wh_json:encode(Errors)]),
+                    catch (crossbar_bindings:fold(<<"v1_resource.execute.delete.accounts">>, [Context1, AccountId])),
+                    Context1#cb_context{doc=wh_json:delete_key(<<"owner_id">>, Results), account_id=undefined}
+            end;
+        #cb_context{resp_error_msg=ErrorMsg, resp_data=ErrorData}=ErrorContext ->
             AccountId = wh_json:get_value(<<"_id">>, Context#cb_context.req_data),
             couch_mgr:db_delete(wh_util:format_account_id(AccountId, encoded)),
-            ErrorContext#cb_context{account_id=undefined}
+            ErrorContext#cb_context{doc=wh_json:set_value(wh_util:to_binary(ErrorMsg), ErrorData, wh_json:new()), account_id=undefined}
     end.
 
 populate_new_account([], _, Results) ->
     Results;
 
 populate_new_account([{<<"phone_numbers">>, #cb_context{storage=[{number, Number}]}=Context}|Props], AccountDb, Results) ->
+    AccountId = wh_util:format_account_id(AccountDb, raw),
     Payload = [Context#cb_context{db_name=AccountDb
-                                  ,account_id=wh_util:format_account_id(AccountDb, raw)}
+                                  ,auth_account_id=AccountId
+                                  ,account_id=AccountId}
                ,Number, <<"activate">>
               ],
     case crossbar_bindings:fold(<<"v1_resource.execute.put.phone_numbers">>, Payload) of
@@ -527,6 +577,11 @@ populate_new_account([{Event, #cb_context{storage=[{iteration, Iteration}]}=Cont
                                  ,wh_json:set_value([<<"errors">>, Event, Iteration], Error, Results))
     end.
 
+prepare_props(Props) ->
+    lists:sort(fun({<<"braintree">>, _}, {_, _}) -> true;
+                   (_, _) -> false
+               end, proplists:delete(?WH_ACCOUNTS_DB, Props)).
+
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
@@ -549,7 +604,7 @@ get_context_jobj(Key, Pass) ->
 %%--------------------------------------------------------------------
 -spec create_response/1 :: (#cb_context{}) -> #cb_context{}.
 create_response(#cb_context{doc=JObj, account_id=undefined}=Context) ->
-    crossbar_util:response(error, JObj, 400, Context);
+    crossbar_util:response_invalid_data(JObj, Context);
 create_response(#cb_context{doc=JObj, account_id=AccountId}=Context) ->
     Token = [{<<"account_id">>, AccountId}
              ,{<<"owner_id">>, wh_json:get_value(<<"owner_id">>, JObj)}
@@ -584,3 +639,21 @@ notfy_new_account(JObj) ->
               | wh_api:default_headers(?APP_VERSION, ?APP_NAME)
              ],
     wapi_notifications:publish_new_account(Notify).
+
+load_invite_code(Context, Id) ->
+    case crossbar_doc:load(Id, Context#cb_context{db_name=?INVITE_DB}) of
+        #cb_context{resp_status=success, doc=Doc}=Context1 ->
+            case wh_json:get_ne_value(<<"status">>, Doc) of
+                undefined ->
+                    Context1#cb_context{resp_data=wh_json:set_value(<<"status">>, <<"unused">>, wh_json:new())};
+                <<"unused">> ->
+                    Context1#cb_context{resp_data=wh_json:set_value(<<"status">>, <<"unused">>, wh_json:new())};
+                _Else ->
+                    crossbar_util:response(error, <<"invite code has already been used">>, 410, Context)
+            end;
+        _Else ->
+            crossbar_util:response(error, <<"invite code not found">>, 404, Context)
+    end.
+
+save_invite_code(Context, Doc) ->
+    crossbar_doc:save(Context#cb_context{db_name=?INVITE_DB, doc=Doc}).

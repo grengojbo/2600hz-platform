@@ -9,9 +9,12 @@
 %%%-------------------------------------------------------------------
 -module(stepswitch_outbound).
 
--export([init/0, handle_req/2]).
+-export([init/0]).
+-export([handle_req/2]).
+-export([get_emergency_cid_number/1]).
 
 -include("stepswitch.hrl").
+-include_lib("whistle_number_manager/include/wh_number_manager.hrl").
 
 -type bridge_resp() :: {'error', wh_json:json_object()} |
                        {'error', 'timeout'} |
@@ -63,10 +66,12 @@ handle_req(<<"originate">>, JObj, Props) ->
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec attempt_to_fulfill_bridge_req/4 :: (ne_binary(), ne_binary(), wh_json:json_object(), proplist()) -> bridge_resp() | execute_ext_resp() | {'error', 'no_resources'}.
+-spec attempt_to_fulfill_bridge_req/4 :: (ne_binary(), ne_binary(), wh_json:json_object(), proplist()) -> bridge_resp() |
+                                                                                                          execute_ext_resp() |
+                                                                                                          {'error', 'no_resources'}.
 attempt_to_fulfill_bridge_req(Number, CtrlQ, JObj, Props) ->
     Result = case stepswitch_util:lookup_number(Number) of
-                 {ok, AccountId, false} ->
+                 {ok, AccountId, false, _} ->
                      lager:debug("found local extension, keeping onnet"),
                      execute_local_extension(Number, AccountId, CtrlQ, JObj);
                  _ ->
@@ -115,13 +120,16 @@ bridge_to_endpoints(Endpoints, IsEmergency, CtrlQ, JObj) ->
     {CIDNum, CIDName} = case IsEmergency of
                             'true' ->
                                 lager:debug("outbound call is using an emergency route, attempting to set CID accordingly"),
-                                {wh_json:get_value(<<"Emergency-Caller-ID-Number">>, JObj,
-                                                   wh_json:get_value(<<"Outgoing-Caller-ID-Number">>, JObj)),
-                                 wh_json:get_value(<<"Emergency-Caller-ID-Name">>, JObj,
-                                                   wh_json:get_value(<<"Outgoing-Caller-ID-Name">>, JObj))};
+                                get_emergency_cid_number(JObj),
+                                {wh_json:get_ne_value(<<"Emergency-Caller-ID-Number">>, JObj,
+                                                      wh_json:get_ne_value(<<"Outgoing-Caller-ID-Number">>, JObj))
+                                 ,wh_json:get_ne_value(<<"Emergency-Caller-ID-Name">>, JObj,
+                                                       wh_json:get_ne_value(<<"Outgoing-Caller-ID-Name">>, JObj))};
                             'false'  ->
-                                {wh_json:get_value(<<"Outgoing-Caller-ID-Number">>, JObj),
-                                 wh_json:get_value(<<"Outgoing-Caller-ID-Name">>, JObj)}
+                                {wh_json:get_ne_value(<<"Outgoing-Caller-ID-Number">>, JObj
+                                                      ,wh_json:get_ne_value(<<"Emergency-Caller-ID-Number">>, JObj))
+                                 ,wh_json:get_ne_value(<<"Outgoing-Caller-ID-Name">>, JObj
+                                                       ,wh_json:get_ne_value(<<"Emergency-Caller-ID-Name">>, JObj))}
                         end,
     lager:debug("set outbound caller id to ~s '~s'", [CIDNum, CIDName]),
 
@@ -136,12 +144,15 @@ bridge_to_endpoints(Endpoints, IsEmergency, CtrlQ, JObj) ->
               end,
     lager:debug("setting from-uri to ~s", [FromURI]),
 
-    CCVs = wh_json:set_values([ KV || {_,V}=KV <- [{<<"Account-ID">>, wh_json:get_value(<<"Account-ID">>, JObj, <<>>)}
-                                                   ,{<<"From-URI">>, FromURI}
-                                                   ,{<<"Ignore-Display-Updates">>, <<"true">>}
-                                                  ],
-                                      V =/= undefined
-                              ], wh_json:get_value(<<"Custom-Channel-Vars">>, JObj, wh_json:new())),
+    AccountId = wh_json:get_value(<<"Account-ID">>, JObj),
+    Updates = [{<<"Account-ID">>, AccountId}
+               ,{<<"Reseller-ID">>, wh_reseller:find_reseller_id(AccountId)}
+               ,{<<"From-URI">>, FromURI}
+               ,{<<"Ignore-Display-Updates">>, <<"true">>}
+               ,{<<"Global-Resource">>, <<"true">>}
+              ],
+    CCVs = wh_json:set_values(props:filter_undefined(Updates)
+                              ,wh_json:get_value(<<"Custom-Channel-Vars">>, JObj, wh_json:new())),
 
     Command = [{<<"Application-Name">>, <<"bridge">>}
                ,{<<"Endpoints">>, Endpoints}
@@ -179,7 +190,10 @@ originate_to_endpoints(Endpoints, JObj) ->
     lager:debug("found resources that can originate the number...to the cloud!"),
     Q = create_queue(),
 
-    CIDNum = wh_json:get_value(<<"Outgoing-Caller-ID-Number">>, JObj),
+    CIDNum = wh_json:get_ne_value(<<"Outgoing-Caller-ID-Number">>, JObj
+                                  ,wh_json:get_ne_value(<<"Emergency-Caller-ID-Number">>, JObj)),
+    CIDName = wh_json:get_ne_value(<<"Outgoing-Caller-ID-Name">>, JObj
+                                   ,wh_json:get_ne_value(<<"Emergency-Caller-ID-Name">>, JObj)),
 
     FromURI = case whapps_config:get_is_true(?APP_NAME, <<"format_from_uri">>, false) of
                   true ->
@@ -193,11 +207,14 @@ originate_to_endpoints(Endpoints, JObj) ->
 
     lager:debug("setting from-uri to ~s", [FromURI]),
 
-    CCVs = wh_json:set_values([ KV || {_,V}=KV <- [{<<"Account-ID">>, wh_json:get_value(<<"Account-ID">>, JObj, <<>>)}
-                                                   ,{<<"From-URI">>, FromURI}
-                                                  ],
-                                      V =/= undefined
-                              ], wh_json:get_value(<<"Custom-Channel-Vars">>, JObj, wh_json:new())),
+    AccountId = wh_json:get_value(<<"Account-ID">>, JObj),
+    Updates = [{<<"Account-ID">>, AccountId}
+               ,{<<"Reseller-ID">>, wh_reseller:find_reseller_id(AccountId)}
+               ,{<<"From-URI">>, FromURI}
+               ,{<<"Global-Resource">>, <<"true">>}
+              ],
+    CCVs = wh_json:set_values(props:filter_undefined(Updates)
+                              ,wh_json:get_value(<<"Custom-Channel-Vars">>, JObj, wh_json:new())),
 
     MsgId = wh_json:get_value(<<"Msg-ID">>, JObj, wh_util:rand_hex_binary(16)),
     Application = wh_json:get_value(<<"Application-Name">>, JObj, <<"park">>),
@@ -211,7 +228,7 @@ originate_to_endpoints(Endpoints, JObj) ->
                ,{<<"Hold-Media">>, wh_json:get_value(<<"Hold-Media">>, JObj)}
                ,{<<"Presence-ID">>, wh_json:get_value(<<"Presence-ID">>, JObj)}
                ,{<<"Outgoing-Caller-ID-Number">>, CIDNum}
-               ,{<<"Outgoing-Caller-ID-Name">>, wh_json:get_value(<<"Outgoing-Caller-ID-Name">>, JObj)}
+               ,{<<"Outgoing-Caller-ID-Name">>, CIDName}
                ,{<<"Ringback">>, wh_json:get_value(<<"Ringback">>, JObj)}
                ,{<<"Dial-Endpoint-Method">>, <<"single">>}
                ,{<<"Continue-On-Fail">>, <<"true">>}
@@ -235,15 +252,20 @@ originate_to_endpoints(Endpoints, JObj) ->
 execute_local_extension(Number, AccountId, CtrlQ, JObj) ->
     lager:debug("number belongs to another account, executing callflow from that account"),
     Q = create_queue(),
-    CIDNum = wh_json:get_value(<<"Outgoing-Caller-ID-Number">>, JObj),
-    CIDName = wh_json:get_value(<<"Outgoing-Caller-ID-Name">>, JObj),
+    CIDNum = wh_json:get_ne_value(<<"Outgoing-Caller-ID-Number">>, JObj
+                                  ,wh_json:get_ne_value(<<"Emergency-Caller-ID-Number">>, JObj)),
+    CIDName = wh_json:get_ne_value(<<"Outgoing-Caller-ID-Name">>, JObj
+                                   ,wh_json:get_ne_value(<<"Emergency-Caller-ID-Name">>, JObj)),
+
     CCVs = [{<<"Account-ID">>, AccountId}
+            ,{<<"Reseller-ID">>, wh_reseller:find_reseller_id(AccountId)}
             ,{<<"Inception">>, <<"off-net">>}
             ,{<<"Retain-CID">>, <<"true">>}
             ,{<<"Caller-ID-Number">>, CIDNum}
             ,{<<"Caller-ID-Name">>, CIDName}
             ,{<<"Callee-ID-Number">>, wh_util:to_binary(Number)}
             ,{<<"Callee-ID-Name">>, get_account_name(Number, AccountId)}
+            ,{<<"Global-Resource">>, <<"false">>}
            ],
     lager:debug("set outbound caller id to ~s '~s'", [CIDNum, CIDName]),
     Command = [{<<"Call-ID">>, get(callid)}
@@ -567,8 +589,8 @@ response({error, Error}, JObj) ->
 %%--------------------------------------------------------------------
 -spec correct_shortdial/2 :: (ne_binary(), wh_json:json_object()) -> ne_binary() | 'fail'.
 correct_shortdial(Number, JObj) ->
-    CIDNum = wh_json:get_value(<<"Outgoing-Caller-ID-Number">>, JObj
-                               ,wh_json:get_value(<<"Emergency-Caller-ID-Number">>, JObj)),
+    CIDNum = wh_json:get_ne_value(<<"Outgoing-Caller-ID-Number">>, JObj
+                               ,wh_json:get_ne_value(<<"Emergency-Caller-ID-Number">>, JObj)),
     MaxCorrection = whapps_config:get_integer(<<"stepswitch">>, <<"max_shortdial_correction">>, 5),
     case is_binary(CIDNum) andalso (size(CIDNum) - size(Number)) of
         Length when Length =< MaxCorrection, Length > 0 ->
@@ -576,6 +598,7 @@ correct_shortdial(Number, JObj) ->
         _ ->
             fail
     end.
+
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
@@ -588,4 +611,57 @@ get_account_name(Number, AccountId) when is_binary(Number) ->
     case couch_mgr:open_doc(?WH_ACCOUNTS_DB, AccountId) of
         {ok, JObj} -> wh_json:get_ne_value(<<"name">>, JObj, Number);
         _ -> Number
+    end.
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Do everything we can to ensure a emergency call uses a number with
+%% e911 enabled
+%% @end
+%%--------------------------------------------------------------------
+-spec get_emergency_cid_number/1 :: (wh_json:json_object()) -> ne_binary().
+get_emergency_cid_number(JObj) ->
+    Account = wh_json:get_value(<<"Account-ID">>, JObj),
+    AccountDb = wh_util:format_account_id(Account, encoded),
+    Candidates = [wh_json:get_ne_value(<<"Emergency-Caller-ID-Number">>, JObj)
+                  ,wh_json:get_ne_value(<<"Outgoing-Caller-ID-Number">>, JObj)
+                 ],
+    Requested = wh_json:get_ne_value(<<"Emergency-Caller-ID-Number">>, JObj
+                                     ,wh_json:get_ne_value(<<"Outgoing-Caller-ID-Number">>, JObj)),
+    case couch_mgr:open_cache_doc(AccountDb, ?WNM_PHONE_NUMBER_DOC) of
+        {ok, PhoneNumbers} ->
+            Numbers = wh_json:get_keys(wh_json:public_fields(PhoneNumbers)),
+            E911Enabled = [Number 
+                           || Number <- Numbers
+                                  ,lists:member(<<"dash_e911">>, wh_json:get_value([Number, <<"features">>], PhoneNumbers, []))
+                          ],
+            get_emergency_cid_number(Requested, Candidates, E911Enabled);
+        {error, _R} ->
+            lager:error("unable to fetch the ~s from account ~s: ~p", [?WNM_PHONE_NUMBER_DOC, Account, _R]),
+            get_emergency_cid_number(Requested, Candidates, [])
+    end.
+
+-spec get_emergency_cid_number/3 :: (ne_binary(), ['undefined' | ne_binary(),...], [ne_binary(),...] | []) -> ne_binary().
+%% if there are no e911 enabled numbers then either use the global system default 
+%% or the requested (if there isnt one)
+get_emergency_cid_number(Requested, _, []) ->
+    case whapps_config:get_non_empty(<<"stepswitch">>, <<"default_emergency_cid_number">>) of
+        undefined -> Requested;
+        DefaultE911 -> DefaultE911
+    end;
+%% If neither their emergency cid or outgoung cid is e911 enabled but their account
+%% has other numbers with e911 then use the first...
+get_emergency_cid_number(_, [], [E911Enabled|_]) ->
+    E911Enabled;
+%% due to the way we built the candidates list it can contain the atom 'undefined'
+%% handle that condition (ignore)
+get_emergency_cid_number(Requested, [undefined|Candidates], E911Enabled) ->
+    get_emergency_cid_number(Requested, Candidates, E911Enabled);
+%% check if the first non-atom undefined element in the list is in the list of
+%% e911 enabled numbers, if so use it otherwise keep checking.
+get_emergency_cid_number(Requested, [Candidate|Candidates], E911Enabled) ->
+    case lists:member(Candidate, E911Enabled) of
+        true -> Candidate;
+        false -> get_emergency_cid_number(Requested, Candidates, E911Enabled)
     end.

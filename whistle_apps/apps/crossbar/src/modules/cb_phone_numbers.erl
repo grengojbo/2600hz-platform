@@ -1,7 +1,6 @@
 %%%-------------------------------------------------------------------
-%%% @copyright (C) 2011, VoIP INC
+%%% @copyright (C) 2011-2012, VoIP INC
 %%% @doc
-%%%
 %%%
 %%% Handle client requests for phone_number documents
 %%%
@@ -22,18 +21,17 @@
          ,put/2, put/3, put/4
          ,post/2, post/4
          ,delete/2, delete/4
+         ,populate_phone_numbers/1
         ]).
 
 -include_lib("crossbar/include/crossbar.hrl").
+-include_lib("whistle_number_manager/include/wh_number_manager.hrl").
+-include_lib("whistle/src/wh_json.hrl").
 
 -define(PORT_DOCS, <<"docs">>).
 -define(PORT, <<"port">>).
 -define(ACTIVATE, <<"activate">>).
 -define(RESERVE, <<"reserve">>).
-
--define(WNM_NUMBER_STATUS, [<<"discovery">>, <<"available">>, <<"reserved">>, <<"released">>
-                                ,<<"in_service">>, <<"disconnected">>, <<"cancelled">>
-                           ]).
 
 -define(FIND_NUMBER_SCHEMA, "{\"$schema\": \"http://json-schema.org/draft-03/schema#\", \"id\": \"http://json-schema.org/draft-03/schema#\", \"properties\": {\"prefix\": {\"required\": \"true\", \"type\": \"string\", \"minLength\": 3, \"maxLength\": 8}, \"quantity\": {\"default\": 1, \"type\": \"integer\", \"minimum\": 1}}}").
 
@@ -52,6 +50,7 @@
 %%% API
 %%%===================================================================
 init() ->
+    _ = crossbar_bindings:bind(<<"account.created">>, ?MODULE, populate_phone_numbers),
     _ = crossbar_bindings:bind(<<"v1_resource.content_types_accepted.phone_numbers">>, ?MODULE, content_types_accepted),
     _ = crossbar_bindings:bind(<<"v1_resource.authenticate">>, ?MODULE, authenticate),
     _ = crossbar_bindings:bind(<<"v1_resource.authorize">>, ?MODULE, authorize),
@@ -61,6 +60,25 @@ init() ->
     _ = crossbar_bindings:bind(<<"v1_resource.execute.put.phone_numbers">>, ?MODULE, put),
     _ = crossbar_bindings:bind(<<"v1_resource.execute.post.phone_numbers">>, ?MODULE, post),
     crossbar_bindings:bind(<<"v1_resource.execute.delete.phone_numbers">>, ?MODULE, delete).
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
+%%
+%% @end
+%%--------------------------------------------------------------------
+-spec populate_phone_numbers/1 :: (#cb_context{}) -> 'ok'.
+populate_phone_numbers(#cb_context{db_name=AccountDb, account_id=AccountId}) ->
+    PVTs = [{<<"_id">>, ?WNM_PHONE_NUMBER_DOC}
+            ,{<<"pvt_account_db">>, AccountDb}
+            ,{<<"pvt_account_id">>, AccountId}
+            ,{<<"pvt_vsn">>, <<"1">>}
+            ,{<<"pvt_type">>, ?WNM_PHONE_NUMBER_DOC}
+            ,{<<"pvt_modified">>, wh_util:current_tstamp()}
+            ,{<<"pvt_created">>, wh_util:current_tstamp()}
+           ],
+    couch_mgr:save_doc(AccountDb, wh_json:from_list(PVTs)),
+    ok.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -291,18 +309,13 @@ find_numbers(#cb_context{query_json=Data}=Context) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec summary/1 :: (#cb_context{}) -> #cb_context{}.
-summary(#cb_context{account_id=AccountId}=Context) ->
-    case crossbar_doc:load(AccountId, Context) of
-        #cb_context{resp_status=success, doc=JObj}=Context1 ->
-            Numbers = [{S, Num} 
-                       || S <- [<<"numbers">>|?WNM_NUMBER_STATUS]
-                              ,(Num = wh_json:get_value(<<"pvt_wnm_", S/binary>>, JObj, [])) =/= []
-                      ],
-            crossbar_util:response(wh_json:from_list(Numbers), Context1);
-        Else ->
-            Else
+summary(Context) ->
+    case crossbar_doc:load(?WNM_PHONE_NUMBER_DOC, Context) of
+        #cb_context{resp_error_code=404}=C ->
+            crossbar_util:response(wh_json:new(), C);
+        Else -> Else
     end.
- 
+
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
@@ -400,27 +413,12 @@ put_attachments(Number, #cb_context{auth_account_id=AuthBy}=Context, [{Filename,
 %% @end
 %%--------------------------------------------------------------------
 -spec set_response/3 :: ({ok, wh_json:json_object()} | {error, term()}, ne_binary(), #cb_context{}) -> #cb_context{}.
-set_response({error, conflict}, _, Context) ->
-    crossbar_util:response_conflicting_docs(Context);
-set_response({error, invalid_state_transition}, _, Context) ->
-    crossbar_util:response(error, <<"authenticated account not authorized to preform that operation">>, 403, Context);
-set_response({error, unauthorized}, _, Context) ->
-    crossbar_util:response(error, <<"authenticated account not authorized to administrate this number">>, 403, Context);
-set_response({error, no_change_required}, _, Context) ->
-    crossbar_util:response_conflicting_docs(Context);
-set_response({error, unknown_carrier}, _, Context) ->
-    crossbar_util:response_db_fatal(Context);
-set_response({error, db_not_reachable}, _, Context) ->
-    crossbar_util:response_datastore_timeout(Context);
-set_response({error, not_found}, Number, Context) ->
-    crossbar_util:response_bad_identifier(Number, Context);
 set_response({ok, Doc}, _, Context) ->
     crossbar_util:response(Doc, Context);
-set_response(ok, _, Context) ->
-    crossbar_util:response(wh_json:new(), Context);
-set_response({error, Else}, _, Context) when is_binary(Else) ->
-    crossbar_util:response_invalid_data(Else, Context);
+set_response({Error, Reason}, _, Context) ->
+    crossbar_util:response(error, wh_util:to_binary(Error), 500, Reason, Context);
 set_response(_Else, _, Context) ->
+    lager:debug("unexpected response: ~p", [_Else]),
     crossbar_util:response_db_fatal(Context).
 
 %%--------------------------------------------------------------------

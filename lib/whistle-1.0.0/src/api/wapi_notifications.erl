@@ -1,16 +1,18 @@
 %%%-------------------------------------------------------------------
-%%% @author James Aimonetti <james@2600hz.org>
-%%% @copyright (C) 2011, VoIP INC
+%%% @copyright (C) 2011-2012, VoIP INC
 %%% @doc
 %%% Notification messages, like voicemail left
 %%% @end
-%%% Created :  6 Dec 2011 by James Aimonetti <james@2600hz.org>
+%%% @contributors
+%%%   James Aimonetti
+%%%   Karl Anderson
 %%%-------------------------------------------------------------------
 -module(wapi_notifications).
 
 -export([bind_q/2, unbind_q/1, unbind_q/2]).
 
 -export([voicemail/1, voicemail_v/1]).
+-export([fax/1, fax_v/1]).
 -export([mwi_update/1, mwi_update_v/1]).
 -export([mwi_query/1, mwi_query_v/1]).
 -export([register/1, register_v/1]).
@@ -22,9 +24,11 @@
 -export([port_request/1, port_request_v/1]).
 -export([cnam_request/1, cnam_request_v/1]).
 -export([low_balance/1, low_balance_v/1]).
+-export([transaction/1, transaction_v/1]).
 -export([system_alert/1, system_alert_v/1]).
 
 -export([publish_voicemail/1, publish_voicemail/2]).
+-export([publish_fax/1, publish_fax/2]).
 -export([publish_mwi_update/1, publish_mwi_update/2]).
 -export([publish_mwi_query/1, publish_mwi_query/2]).
 -export([publish_register/1, publish_register/2]).
@@ -36,11 +40,13 @@
 -export([publish_port_request/1, publish_port_request/2]).
 -export([publish_cnam_request/1, publish_cnam_request/2]).
 -export([publish_low_balance/1, publish_low_balance/2]).
+-export([publish_transaction/1, publish_transaction/2]).
 -export([publish_system_alert/1, publish_system_alert/2]).
 
 -include("../wh_api.hrl").
 
 -define(NOTIFY_VOICEMAIL_NEW, <<"notifications.voicemail.new">>).
+-define(NOTIFY_FAX_NEW, <<"notifications.fax.new">>).
 -define(NOTIFY_MWI_UPDATE, <<"notifications.sip.mwi_update">>).
 -define(NOTIFY_MWI_QUERY, <<"notifications.sip.mwi_query">>).
 -define(NOTIFY_DEREGISTER, <<"notifications.sip.deregister">>).
@@ -55,20 +61,43 @@
 -define(NOTIFY_PORT_REQUEST, <<"notifications.number.port">>).
 -define(NOTIFY_CNAM_REQUEST, <<"notifications.number.cnam">>).
 -define(NOTIFY_LOW_BALANCE, <<"notifications.account.low_balance">>).
+-define(NOTIFY_TRANSACTION, <<"notifications.account.transaction">>).
 -define(NOTIFY_SYSTEM_ALERT, <<"notifications.system.alert">>).
 
 %% Notify New Voicemail
 -define(VOICEMAIL_HEADERS, [<<"From-User">>, <<"From-Realm">>, <<"To-User">>, <<"To-Realm">>
-                                    ,<<"Account-DB">>, <<"Voicemail-Box">>, <<"Voicemail-Name">>, <<"Voicemail-Timestamp">>]).
--define(OPTIONAL_VOICEMAIL_HEADERS, [<<"Voicemail-Length">>, <<"Caller-ID-Name">>, <<"Caller-ID-Number">>, <<"Call-ID">>]).
+                                ,<<"Account-DB">>, <<"Voicemail-Box">>, <<"Voicemail-Name">>
+                                ,<<"Voicemail-Timestamp">>
+                           ]).
+-define(OPTIONAL_VOICEMAIL_HEADERS, [<<"Voicemail-Length">>, <<"Call-ID">>
+                                         ,<<"Caller-ID-Number">>, <<"Caller-ID-Name">>
+                                    ]).
 -define(VOICEMAIL_VALUES, [{<<"Event-Category">>, <<"notification">>}
-                               ,{<<"Event-Name">>, <<"new_voicemail">>}
-                              ]).
+                           ,{<<"Event-Name">>, <<"new_voicemail">>}
+                          ]).
 -define(VOICEMAIL_TYPES, []).
+
+%% Notify New Fax
+-define(FAX_HEADERS, [<<"From-User">>, <<"From-Realm">>
+                          ,<<"To-User">>, <<"To-Realm">>
+                          ,<<"Account-DB">>, <<"Fax-ID">>
+                     ]).
+-define(OPTIONAL_FAX_HEADERS, [<<"Caller-ID-Name">>, <<"Caller-ID-Number">>, <<"Call-ID">>
+                                   ,<<"Total-Pages">>, <<"Transferred-Pages">>
+                                   ,<<"Transfer-Rate">>, <<"Result-Text">>, <<"ECM-Used">>
+                                   ,<<"Owner-ID">>, <<"Fax-Timestamp">>
+                              ]).
+-define(FAX_VALUES, [{<<"Event-Category">>, <<"notification">>}
+                     ,{<<"Event-Name">>, <<"new_fax">>}
+                    ]).
+-define(FAX_TYPES, []).
 
 %% Notify updated MWI
 -define(MWI_REQ_HEADERS, [<<"Notify-User">>, <<"Notify-Realm">>, <<"Messages-New">>, <<"Messages-Saved">>]).
--define(OPTIONAL_MWI_REQ_HEADERS, [<<"Messages-Urgent">>, <<"Messages-Urgent-Saved">>]).
+-define(OPTIONAL_MWI_REQ_HEADERS, [<<"Messages-Urgent">>, <<"Messages-Urgent-Saved">>
+                                       ,<<"Call-ID">>, <<"Subscription-Call-ID">>
+                                       ,<<"Switch-Nodename">>, <<"Message-Account">>
+                                  ]).
 -define(MWI_REQ_VALUES, [{<<"Event-Category">>, <<"notification">>}
                          ,{<<"Event-Name">>, <<"mwi">>}
                         ]).
@@ -80,17 +109,19 @@
 
 %% Notify updated MWI
 -define(MWI_QUERY_HEADERS, [<<"Username">>, <<"Realm">>]).
--define(OPTIONAL_MWI_QUERY_HEADERS, [<<"Call-ID">>, <<"Node">>]).
+-define(OPTIONAL_MWI_QUERY_HEADERS, [<<"Call-ID">>, <<"Subscription-Call-ID">>
+                                         ,<<"Switch-Nodename">>, <<"Message-Account">>
+                                    ]).
 -define(MWI_QUERY_VALUES, [{<<"Event-Category">>, <<"notification">>}
                            ,{<<"Event-Name">>, <<"mwi_query">>}
                           ]).
 -define(MWI_QUERY_TYPES, []).
 
 %% Notify Presence_Probe
--define(PRESENCE_PROBE_HEADERS, [<<"From">>, <<"To">>, <<"Node">>]).
+-define(PRESENCE_PROBE_HEADERS, [<<"From">>, <<"To">>, <<"Switch-Nodename">>]).
 -define(OPTIONAL_PRESENCE_PROBE_HEADERS, [<<"From-User">>, <<"From-Realm">>, <<"To-User">>, <<"To-Realm">>
                                               ,<<"Expires">>, <<"Subscription-Call-ID">>, <<"Subscription-Type">>
-                                              ,<<"Subscription">>
+                                              ,<<"Subscription">>, <<"Dialog-State">>
                                          ]).
 -define(PRESENCE_PROBE_VALUES, [{<<"Event-Category">>, <<"notification">>}
                                 ,{<<"Event-Name">>, <<"presence_probe">>}
@@ -99,7 +130,10 @@
 
 %% Notify Presence Update
 -define(PRESENCE_UPDATE_HEADERS, [<<"Presence-ID">>]).
--define(OPTIONAL_PRESENCE_UPDATE_HEADERS, [<<"To">>, <<"From">>, <<"State">>, <<"Call-ID">>]).
+-define(OPTIONAL_PRESENCE_UPDATE_HEADERS, [<<"To">>, <<"From">>, <<"State">>
+                                               ,<<"Call-ID">>, <<"Subscription-Call-ID">>
+                                               ,<<"Switch-Nodename">>, <<"Dialog-State">>
+                                          ]).
 -define(PRESENCE_UPDATE_VALUES, [{<<"Event-Category">>, <<"notification">>}
                                  ,{<<"Event-Name">>, <<"presence_update">>}
                                 ]).
@@ -171,8 +205,16 @@
                             ]).
 -define(LOW_BALANCE_TYPES, []).
 
+%% Notify Transaction
+-define(TRANSACTION_HEADERS, [<<"Account-ID">>, <<"Transaction">>]).
+-define(OPTIONAL_TRANSACTION_HEADERS, [<<"Service-Plan">>, <<"Billing-ID">>]).
+-define(TRANSACTION_VALUES, [{<<"Event-Category">>, <<"notification">>}
+                             ,{<<"Event-Name">>, <<"transaction">>}
+                            ]).
+-define(TRANSACTION_TYPES, []).
+
 %% Notify System Alert
--define(SYSTEM_ALERT_HEADERS, [<<"Level">>, <<"Message">>]).
+-define(SYSTEM_ALERT_HEADERS, [<<"Subject">>, <<"Message">>]).
 -define(OPTIONAL_SYSTEM_ALERT_HEADERS, [<<"Pid">>, <<"Module">>, <<"Line">>, <<"Request-ID">>, <<"Section">>
                                             ,<<"Node">>, <<"Details">>, <<"Account-ID">>
                                        ]).
@@ -182,7 +224,7 @@
 -define(SYSTEM_ALERT_TYPES, []).
 
 %%--------------------------------------------------------------------
-%% @doc MWI - Update the Message Waiting Indicator on a device - see wiki
+%% @doc
 %% Takes proplist, creates JSON string or error
 %% @end
 %%--------------------------------------------------------------------
@@ -199,6 +241,25 @@ voicemail_v(Prop) when is_list(Prop) ->
     wh_api:validate(Prop, ?VOICEMAIL_HEADERS, ?VOICEMAIL_VALUES, ?VOICEMAIL_TYPES);
 voicemail_v(JObj) ->
     voicemail_v(wh_json:to_proplist(JObj)).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Takes proplist, creates JSON string or error
+%% @end
+%%--------------------------------------------------------------------
+fax(Prop) when is_list(Prop) ->
+    case fax_v(Prop) of
+        true -> wh_api:build_message(Prop, ?FAX_HEADERS, ?OPTIONAL_FAX_HEADERS);
+        false -> {error, "Proplist failed validation for fax"}
+    end;
+fax(JObj) ->
+    fax(wh_json:to_proplist(JObj)).
+
+-spec fax_v/1 :: (api_terms()) -> boolean().
+fax_v(Prop) when is_list(Prop) ->
+    wh_api:validate(Prop, ?FAX_HEADERS, ?FAX_VALUES, ?FAX_TYPES);
+fax_v(JObj) ->
+    fax_v(wh_json:to_proplist(JObj)).
 
 %%--------------------------------------------------------------------
 %% @doc MWI - Update the Message Waiting Indicator on a device - see wiki
@@ -412,6 +473,25 @@ low_balance_v(JObj) ->
     low_balance_v(wh_json:to_proplist(JObj)).
 
 %%--------------------------------------------------------------------
+%% @doc Low Balance notification - see wiki
+%% Takes proplist, creates JSON string or error
+%% @end
+%%--------------------------------------------------------------------
+transaction(Prop) when is_list(Prop) ->
+    case transaction_v(Prop) of
+        true -> wh_api:build_message(Prop, ?TRANSACTION_HEADERS, ?OPTIONAL_TRANSACTION_HEADERS);
+        false -> {error, "Proplist failed validation for transaction"}
+    end;
+transaction(JObj) ->
+    transaction(wh_json:to_proplist(JObj)).
+
+-spec transaction_v/1 :: (api_terms()) -> boolean().
+transaction_v(Prop) when is_list(Prop) ->
+    wh_api:validate(Prop, ?TRANSACTION_HEADERS, ?TRANSACTION_VALUES, ?TRANSACTION_TYPES);
+transaction_v(JObj) ->
+    transaction_v(wh_json:to_proplist(JObj)).
+
+%%--------------------------------------------------------------------
 %% @doc System alert notification - see wiki
 %% Takes proplist, creates JSON string or error
 %% @end
@@ -439,6 +519,9 @@ bind_to_q(Q, undefined) ->
     ok = amqp_util:bind_q_to_notifications(Q, <<"notifications.*.*">>);
 bind_to_q(Q, [new_voicemail|T]) ->
     ok = amqp_util:bind_q_to_notifications(Q, ?NOTIFY_VOICEMAIL_NEW),
+    bind_to_q(Q, T);
+bind_to_q(Q, [new_fax|T]) ->
+    ok = amqp_util:bind_q_to_notifications(Q, ?NOTIFY_FAX_NEW),
     bind_to_q(Q, T);
 bind_to_q(Q, [mwi_update|T]) ->
     ok = amqp_util:bind_q_to_notifications(Q, ?NOTIFY_MWI_UPDATE),
@@ -479,6 +562,9 @@ bind_to_q(Q, [cnam_requests|T]) ->
 bind_to_q(Q, [low_balance|T]) ->
     ok = amqp_util:bind_q_to_notifications(Q, ?NOTIFY_LOW_BALANCE),
     bind_to_q(Q, T);
+bind_to_q(Q, [transaction|T]) ->
+    ok = amqp_util:bind_q_to_notifications(Q, ?NOTIFY_TRANSACTION),
+    bind_to_q(Q, T);
 bind_to_q(Q, [system_alerts|T]) ->
     ok = amqp_util:bind_q_to_notifications(Q, ?NOTIFY_SYSTEM_ALERT),
     bind_to_q(Q, T);
@@ -498,6 +584,9 @@ unbind_q_from(Q, undefined) ->
     ok = amqp_util:unbind_q_from_notifications(Q, <<"notifications.*.*">>);
 unbind_q_from(Q, [new_voicemail|T]) ->
     ok = amqp_util:unbind_q_from_notifications(Q, ?NOTIFY_VOICEMAIL_NEW),
+    unbind_q_from(Q, T);
+unbind_q_from(Q, [new_fax|T]) ->
+    ok = amqp_util:unbind_q_from_notifications(Q, ?NOTIFY_FAX_NEW),
     unbind_q_from(Q, T);
 unbind_q_from(Q, [mwi_update|T]) ->
     ok = amqp_util:unbind_q_from_notifications(Q, ?NOTIFY_MWI_UPDATE),
@@ -538,6 +627,9 @@ unbind_q_from(Q, [cnam_request|T]) ->
 unbind_q_from(Q, [low_balance|T]) ->
     ok = amqp_util:unbind_q_from_notifications(Q, ?NOTIFY_LOW_BALANCE),
     unbind_q_from(Q, T);
+unbind_q_from(Q, [transaction|T]) ->
+    ok = amqp_util:unbind_q_from_notifications(Q, ?NOTIFY_TRANSACTION),
+    unbind_q_from(Q, T);
 unbind_q_from(Q, [system_alert|T]) ->
     ok = amqp_util:unbind_q_from_notifications(Q, ?NOTIFY_SYSTEM_ALERT),
     unbind_q_from(Q, T);
@@ -551,6 +643,14 @@ publish_voicemail(JObj) ->
 publish_voicemail(Voicemail, ContentType) ->
     {ok, Payload} = wh_api:prepare_api_payload(Voicemail, ?VOICEMAIL_VALUES, fun ?MODULE:voicemail/1),
     amqp_util:notifications_publish(?NOTIFY_VOICEMAIL_NEW, Payload, ContentType).
+
+-spec publish_fax/1 :: (api_terms()) -> 'ok'.
+-spec publish_fax/2 :: (api_terms(), ne_binary()) -> 'ok'.
+publish_fax(JObj) ->
+    publish_fax(JObj, ?DEFAULT_CONTENT_TYPE).
+publish_fax(Fax, ContentType) ->
+    {ok, Payload} = wh_api:prepare_api_payload(Fax, ?FAX_VALUES, fun ?MODULE:fax/1),
+    amqp_util:notifications_publish(?NOTIFY_FAX_NEW, Payload, ContentType).
 
 -spec publish_mwi_update/1 :: (api_terms()) -> 'ok'.
 -spec publish_mwi_update/2 :: (api_terms(), ne_binary()) -> 'ok'.
@@ -639,6 +739,14 @@ publish_low_balance(JObj) ->
 publish_low_balance(API, ContentType) ->
     {ok, Payload} = wh_api:prepare_api_payload(API, ?LOW_BALANCE_VALUES, fun ?MODULE:low_balance/1),
     amqp_util:notifications_publish(?NOTIFY_LOW_BALANCE, Payload, ContentType).
+
+-spec publish_transaction/1 :: (api_terms()) -> 'ok'.
+-spec publish_transaction/2 :: (api_terms(), ne_binary()) -> 'ok'.
+publish_transaction(JObj) ->
+    publish_transaction(JObj, ?DEFAULT_CONTENT_TYPE).
+publish_transaction(API, ContentType) ->
+    {ok, Payload} = wh_api:prepare_api_payload(API, ?TRANSACTION_VALUES, fun ?MODULE:transaction/1),
+    amqp_util:notifications_publish(?NOTIFY_TRANSACTION, Payload, ContentType).
 
 -spec publish_system_alert/1 :: (api_terms()) -> 'ok'.
 -spec publish_system_alert/2 :: (api_terms(), ne_binary()) -> 'ok'.

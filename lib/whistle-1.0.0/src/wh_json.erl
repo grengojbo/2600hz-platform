@@ -22,7 +22,7 @@
 -export([get_json_value/2, get_json_value/3]).
 -export([is_true/2, is_true/3, is_false/2, is_false/3, is_empty/1]).
 
--export([filter/2, filter/3, map/2, find/2, find/3]).
+-export([filter/2, filter/3, map/2, foldl/3, find/2, find/3]).
 -export([get_ne_value/2, get_ne_value/3]).
 -export([get_value/2, get_value/3, get_values/1]).
 -export([get_keys/1, get_keys/2]).
@@ -32,7 +32,13 @@
 
 -export([from_list/1, merge_jobjs/2]).
 
--export([normalize_jobj/1, normalize/1, is_json_object/1, is_valid_json_object/1, is_json_term/1]).
+-export([normalize_jobj/1
+         ,normalize/1
+         ,normalize_key/1
+         ,is_json_object/1
+         ,is_valid_json_object/1
+         ,is_json_term/1
+        ]).
 -export([public_fields/1, private_fields/1, is_private_key/1]).
 
 -export([encode/1]).
@@ -55,11 +61,11 @@
 
 -spec new/0 :: () -> json_object().
 new() ->
-    ?EMPTY_JSON_OBJECT.
+    ?JSON_WRAPPER([]).
 
 -spec encode/1 :: (json_object()) -> iolist() | ne_binary().
 encode(JObj) ->
-    mochijson2:encode(JObj).
+    ejson:encode(JObj).
 
 -spec decode/1 :: (iolist() | ne_binary()) -> json_object().
 -spec decode/2 :: (iolist() | ne_binary(), ne_binary()) -> json_object().
@@ -68,7 +74,7 @@ decode(Thing) when is_list(Thing) orelse is_binary(Thing) ->
     decode(Thing, ?DEFAULT_CONTENT_TYPE).
 
 decode(JSON, <<"application/json">>) ->
-    mochijson2:decode(JSON).
+    ejson:decode(JSON).
 
 -spec is_empty/1 :: (term()) -> boolean().
 is_empty(MaybeJObj) ->
@@ -160,7 +166,7 @@ recursive_to_proplist(Else) ->
 %%   key=val&key2[]=v2_1&key2[]=v2_2&key3[key3_1]=v3_1
 -spec to_querystring/1 :: (json_object()) -> iolist().
 to_querystring(JObj) ->
-    to_querystring(normalize(JObj), <<>>).
+    to_querystring(JObj, <<>>).
 
 %% if Prefix is empty, don't wrap keys in array tags, otherwise Prefix[key]=value
 -spec to_querystring/2 :: (json_object(), iolist() | binary()) -> iolist().
@@ -236,6 +242,11 @@ filter(Pred, JObj, Key) ->
 -spec map/2 :: (fun((json_string(), json_term()) -> term()), json_object()) -> json_object().
 map(F, ?JSON_WRAPPER(Prop)) ->
     from_list([ F(K, V) || {K,V} <- Prop]).
+
+-spec foldl/3 :: (fun((json_string() | json_strings(), json_term(), any()) -> any()), any(), json_object()) -> any().
+foldl(F, Acc0, ?JSON_WRAPPER([])) when is_function(F, 3) -> Acc0;
+foldl(F, Acc0, ?JSON_WRAPPER(Prop)) when is_function(F, 3) ->
+    lists:foldl(fun({Key, Value}, Acc1) -> F(Key, Value, Acc1) end, Acc0, Prop).
 
 -spec get_string_value/2 :: (json_string() | json_strings(), json_object() | json_objects()) -> 'undefined' | list().
 -spec get_string_value/3 :: (json_string() | json_strings(), json_object(), Default) -> list() | Default.
@@ -637,7 +648,6 @@ normalize_key_char(C) when is_integer(C), 16#C0 =< C, C =< 16#D6 -> C + 32; % fr
 normalize_key_char(C) when is_integer(C), 16#D8 =< C, C =< 16#DE -> C + 32; % so we only loop once
 normalize_key_char(C) -> C.
 
-
 %%--------------------------------------------------------------------
 %% @public
 %% @doc
@@ -761,8 +771,11 @@ merge_recursive_test() ->
     ?assertEqual(true, is_json_object(JObj)),
     ?assertEqual(true, undefined =/= get_value(<<"d1k1">>, JObj)),
     ?assertEqual(true, undefined =/= get_value(<<"d2k1">>, JObj)),
+
     ?assertEqual(true, undefined =/= get_value([<<"d1k3">>, 2], JObj)),
+
     ?assertEqual(true, undefined =/= get_value(<<"sub_d1">>, JObj)),
+
     ?assertEqual(true, undefined =/= get_value([<<"sub_d1">>, <<"d1k1">>], JObj)),
     ?assertEqual(true, d2k2 =:= get_value(<<"d1k2">>, JObj)), %% second JObj takes precedence
     ?assertEqual(true, undefined =:= get_value(<<"missing_k">>, JObj)).
@@ -992,7 +1005,7 @@ to_querystring_test() ->
              ,{<<"{\"foo\":\"bar\"}">>, <<"foo=bar">>}
              ,{<<"{\"foo\":\"bar\",\"fizz\":\"buzz\"}">>, <<"foo=bar&fizz=buzz">>}
              ,{<<"{\"foo\":\"bar\",\"fizz\":\"buzz\",\"arr\":[1,3,5]}">>, <<"foo=bar&fizz=buzz&arr[]=1&arr[]=3&arr[]=5">>}
-             ,{<<"{\"Msg-ID\":\"123-abc\"}">>, <<"msg_id=123-abc">>}
+             ,{<<"{\"Msg-ID\":\"123-abc\"}">>, <<"Msg-ID=123-abc">>}
              ,{<<"{\"url\":\"http://user:pass@host:port/\"}">>, <<"url=http%3A%2F%2Fuser%3Apass%40host%3Aport%2F">>}
              ,{<<"{\"topkey\":{\"subkey1\":\"v1\",\"subkey2\":\"v2\",\"subkey3\":[\"v31\",\"v32\"]}}">>
                    ,<<"topkey[subkey1]=v1&topkey[subkey2]=v2&topkey[subkey3][]=v31&topkey[subkey3][]=v32">>}

@@ -253,7 +253,6 @@ get_all_kvs(Category) ->
                     wh_json:to_proplist(NodeJObj)
             end
     end.
-    
 
 %%-----------------------------------------------------------------------------
 %% @public
@@ -308,16 +307,14 @@ flush(Category0, Keys, Node0) ->
     Category = wh_util:to_binary(Category0),
     Node = wh_util:to_binary(Node0),
 
-    {ok, Cache} = whistle_apps_sup:config_cache_proc(),
-
     UpdateFun = fun(J) ->
                         NodeConfig = wh_json:get_value(Node, J, wh_json:new()),
                         wh_json:delete_key(Keys, NodeConfig)
                 end,
 
-    {ok, JObj} = wh_cache:peek_local(Cache, category_key(Category)),
+    {ok, JObj} = wh_cache:peek_local(?WHAPPS_CONFIG_CACHE, category_key(Category)),
     JObj1 = wh_json:set_value(Node, UpdateFun(JObj), JObj),
-    {ok, _} = cache_jobj(Cache, Category, JObj1),
+    {ok, _} = cache_jobj(?WHAPPS_CONFIG_CACHE, Category, JObj1),
     ok.
 
 %%-----------------------------------------------------------------------------
@@ -342,12 +339,13 @@ import(Category) ->
 %% 3. from a flat file
 %% @end
 %%-----------------------------------------------------------------------------
--spec fetch_category/2 :: (ne_binary(), pid()) -> {'ok', wh_json:json_object()} |
-                                                  {'error', 'not_found'}.
+-spec fetch_category/2 :: (ne_binary(), pid() | atom()) -> {'ok', wh_json:json_object()} |
+                                                           {'error', 'not_found'}.
 fetch_category(Category, Cache) ->
     Lookups = [fun fetch_file_config/2
                ,fun fetch_db_config/2
-               ,fun(Cat, C) -> wh_cache:peek_local(C, {?MODULE, Cat}) end],
+               ,fun(Cat, C) -> wh_cache:peek_local(C, {?MODULE, Cat}) end
+              ],
     lists:foldr(fun(_, {ok, _}=Acc) -> Acc;
                    (F, _) -> F(Category, Cache)
                 end, {error, not_found}, Lookups).
@@ -378,7 +376,7 @@ fetch_db_config(Category, Cache) ->
 %% save it to the db and cache it
 %% @end
 %%-----------------------------------------------------------------------------
--spec fetch_file_config/2 :: (ne_binary(), pid()) -> {'ok', wh_json:json_object()}.
+-spec fetch_file_config/2 :: (ne_binary(), pid() | atom()) -> {'ok', wh_json:json_object()}.
 fetch_file_config(Category, Cache) ->
     File = category_to_file(Category),
     case file:consult(File) of
@@ -437,7 +435,7 @@ do_set(Category0, Keys, Value, Node0) ->
 %% update the configuration category for a given node in both the db and cache
 %% @end
 %%-----------------------------------------------------------------------------
--spec update_category_node/4 :: (ne_binary(), ne_binary(), fun((wh_json:json_object()) -> wh_json:json_object()) , pid()) -> {'ok', wh_json:json_object()}.
+-spec update_category_node/4 :: (ne_binary(), ne_binary(), fun((wh_json:json_object()) -> wh_json:json_object()) , pid() | atom()) -> {'ok', wh_json:json_object()}.
 update_category_node(Category, Node, UpdateFun, Cache) ->
     DBReady = case wh_cache:fetch_local(Cache, couch_ready_key()) of
                   {ok, true} -> true;
@@ -473,7 +471,7 @@ update_category_node(Category, Node, UpdateFun, Cache) ->
 %% update the entire category in both the db and cache
 %% @end
 %%-----------------------------------------------------------------------------
--spec update_category/3 :: (ne_binary(), wh_json:json_object(), pid()) -> {'ok', wh_json:json_object()}.
+-spec update_category/3 :: (ne_binary(), wh_json:json_object(), atom()) -> {'ok', wh_json:json_object()}.
 update_category(Category, JObj, Cache) ->
     lager:debug("updating configuration category ~s", [Category]),
     JObj1 = wh_json:set_value(<<"_id">>, Category, JObj),
@@ -499,6 +497,8 @@ category_to_file(<<"whapps_controller">>) ->
     [code:lib_dir(whistle_apps, priv), "/startup.config"];
 category_to_file(<<"notify.voicemail_to_email">>) ->
     [code:lib_dir(notify, priv), "/notify_vm.config"];
+category_to_file(<<"notify.fax_to_email">>) ->
+    [code:lib_dir(notify, priv), "/notify_fax.config"];
 category_to_file(<<"notify.deregister">>) ->
     [code:lib_dir(notify, priv), "/notify_deregister.config"];
 category_to_file(<<"notify.password_recovery">>) ->
@@ -515,6 +515,8 @@ category_to_file(<<"notify.low_balance">>) ->
     [code:lib_dir(notify, priv), "/notify_low_balance.config"];
 category_to_file(<<"notify.system_alert">>) ->
     [code:lib_dir(notify, priv), "/notify_system_alert.config"];
+category_to_file(<<"notify.transaction">>) ->
+    [code:lib_dir(notify, priv), "/notify_transaction.config"];
 category_to_file(<<"smtp_client">>) ->
     [code:lib_dir(whistle_apps, priv), "/smtp_client.config"];
 category_to_file(<<"alerts">>) ->

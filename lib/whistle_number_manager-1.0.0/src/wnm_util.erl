@@ -18,13 +18,11 @@
 -export([normalize_number/1]).
 -export([to_e164/1, to_npan/1, to_1npan/1]).
 -export([is_e164/1, is_npan/1, is_1npan/1]).
--export([exec_providers_save/4]).
--export([update_numbers_on_account/1
-         ,update_numbers_on_account/2
-         ,update_numbers_on_account/3
-        ]).
+-export([find_account_id/1]).
+-export([get_all_number_dbs/0]).
+-export([are_jobjs_identical/2]).
 
--include_lib("whistle_number_manager/include/wh_number_manager.hrl").
+-include("wh_number_manager.hrl").
 -include_lib("proper/include/proper.hrl").
 -include_lib("whistle/include/wh_databases.hrl").
 
@@ -38,7 +36,7 @@
 %%--------------------------------------------------------------------
 -spec is_reconcilable/1 :: (ne_binary()) -> boolean().
 is_reconcilable(Number) ->
-    Regex = whapps_config:get_binary(?WNM_CONFIG_CAT, <<"reconcile_regex">>, <<"^\\+{0,1}1{0,1}(\\d{10})$">>),
+    Regex = whapps_config:get_binary(?WNM_CONFIG_CAT, <<"reconcile_regex">>, <<"^\\+?1?\\d{10}$">>),
     Num = wnm_util:normalize_number(Number),
     case re:run(Num, Regex) of
         nomatch ->
@@ -71,17 +69,20 @@ is_tollfree(Number) ->
 %% and if return the name as well as the data
 %% @end
 %%--------------------------------------------------------------------
--spec get_carrier_module/1 :: (wh_json:json_object()) -> {ok, atom(), wh_json:json_object()} 
-                                                     | {error, not_specified | unknown_module}.
+-spec get_carrier_module/1 :: (wh_json:json_object()) -> atom().
 get_carrier_module(JObj) ->
-    case wh_json:get_value(<<"pvt_module_name">>, JObj) of
-        undefined -> {error, not_specified};
+    case wh_json:get_ne_value(<<"pvt_module_name">>, JObj) of
+        undefined -> 
+            lager:debug("carrier module not specified on number document"),
+            undefined;
         Module ->
             Carriers = list_carrier_modules(),
             Carrier = try_load_module(Module),
             case lists:member(Carrier, Carriers) of
-                true -> {ok, Carrier, wh_json:get_value(<<"pvt_module_data">>, JObj, wh_json:new())};
-                false -> {error, unknown_module}
+                true -> Carrier;
+                false -> 
+                    lager:debug("carrier module ~s specified on number document does not exist", [Carrier]),
+                    undefined
             end
     end.
 
@@ -103,7 +104,7 @@ list_carrier_modules() ->
 %% Given a number determine the database name that it should belong to.
 %% @end
 %%--------------------------------------------------------------------
--spec number_to_db_name/1 :: (ne_binary()) -> ne_binary().
+-spec number_to_db_name/1 :: (binary()) -> 'undefined' | ne_binary().
 number_to_db_name(<<NumPrefix:5/binary, _/binary>>) ->
     wh_util:to_binary(
       http_uri:encode(
@@ -111,7 +112,9 @@ number_to_db_name(<<NumPrefix:5/binary, _/binary>>) ->
           list_to_binary([?WNM_DB_PREFIX, NumPrefix])
          )
        )
-     ).
+     );
+number_to_db_name(_) ->
+    undefined.
 
 %%--------------------------------------------------------------------
 %% @public
@@ -195,139 +198,29 @@ to_e164(Other) ->
 -spec to_npan/1 :: (ne_binary()) -> ne_binary().
 to_npan(<<"011", N/binary>>) ->
     to_npan(N);
-to_npan(<<$+, $1, N/bitstring>>) when erlang:bit_size(N) =:= 80 ->
+to_npan(<<$+, $1, N/binary>>) when erlang:byte_size(N) =:= 10 ->
     N;
-to_npan(<<$1, N/bitstring>>) when erlang:bit_size(N) =:= 80 ->
+to_npan(<<$1, N/binary>>) when erlang:byte_size(N) =:= 10 ->
     N;
-to_npan(NPAN) when erlang:bit_size(NPAN) =:= 80 ->
+to_npan(NPAN) when erlang:byte_size(NPAN) =:= 10 ->
     NPAN;
 to_npan(Other) ->
     Other.
 
--spec to_1npan/1 :: (NPAN) -> binary() when
-      NPAN :: binary().
+-spec to_1npan/1 :: (ne_binary()) -> ne_binary().
 to_1npan(<<"011", N/binary>>) ->
     to_1npan(N);
-to_1npan(<<$+, $1, N/bitstring>>) when erlang:bit_size(N) =:= 80 ->
-    <<$1, N/bitstring>>;
-to_1npan(<<$1, N/bitstring>>=NPAN1) when erlang:bit_size(N) =:= 80 ->
+to_1npan(<<$+, $1, N/binary>>) when erlang:byte_size(N) =:= 10 ->
+    <<$1, N/binary>>;
+to_1npan(<<$1, N/binary>>=NPAN1) when erlang:byte_size(N) =:= 10 ->
     NPAN1;
-to_1npan(NPAN) when erlang:bit_size(NPAN) =:= 80 ->
-    <<$1, NPAN/bitstring>>;
+to_1npan(NPAN) when erlang:byte_size(NPAN) =:= 10 ->
+    <<$1, NPAN/binary>>;
 to_1npan(Other) ->
     Other.
 
 %%--------------------------------------------------------------------
 %% @public
-%% @doc
-%% execute the save function of all providers, folding the jobj through
-%% them and collecting any errors...
-%% @end
-%%--------------------------------------------------------------------
--spec exec_providers_save/4 :: (wh_json:json_object(), wh_json:json_object(), ne_binary(), ne_binary()) -> {ok | error, wh_json:json_object()}.
--spec exec_providers_save/6 :: (list(), wh_json:json_object(), wh_json:json_object(), ne_binary(), ne_binary(), list()) -> {ok | error, wh_json:json_object()}.
-
-exec_providers_save(JObj, PriorJObj, Number, State) ->
-    Providers = whapps_config:get(?WNM_CONFIG_CAT, <<"providers">>, []),
-    exec_providers_save(Providers, JObj, PriorJObj, Number, State, []).
-
-exec_providers_save([], JObj, _, _, _, []) ->
-    {ok, JObj};
-exec_providers_save([], _, _, _, _, Result) ->
-    {error, wh_json:from_list(Result)};
-exec_providers_save([Provider|Providers], JObj, PriorJObj, Number, State, Result) ->
-    try
-        lager:debug("executing provider ~s", [Provider]),
-        case try_load_module(<<"wnm_", Provider/binary>>) of
-            false ->
-                lager:debug("provider ~s is unknown, skipping", [Provider]),
-                exec_providers_save(Providers, JObj, PriorJObj, Number, State, Result);
-            Mod ->
-                case Mod:save(JObj, PriorJObj, Number, State) of
-                    {ok, J} ->
-                        exec_providers_save(Providers, J, PriorJObj, Number, State, Result);
-                    {error, Error} ->
-                        lager:debug("provider ~s created error: ~p", [Provider, Error]),
-                        exec_providers_save(Providers, JObj, PriorJObj, Number, State, [{Provider, Error}|Result])
-                end
-        end
-    catch
-        _:R ->
-            lager:debug("executing provider ~s threw exception: ~p", [Provider, R]),
-            exec_providers_save(Providers, JObj, PriorJObj, Number, State, [{Provider, <<"threw exception">>}|Result])
-    end.
-
-%%--------------------------------------------------------------------
-%% @public
-%% @doc
-%% Adds a number to the list kept on the account defintion doc, then
-%% aggregates the new document to the accounts db.
-%% @end
-%%--------------------------------------------------------------------
--spec update_numbers_on_account/1 :: (wh_json:json_object()) -> {ok, wh_json:json_object()} |
-                                                                {error, term()}.
--spec update_numbers_on_account/2 :: (ne_binary(), ne_binary()) -> {ok, wh_json:json_object()} |
-                                                                   {error, term()}.
--spec update_numbers_on_account/3 :: (ne_binary(), ne_binary(), undefined | ne_binary()) -> {ok, wh_json:json_object()} |
-                                                                                            {error, term()}.
-
-update_numbers_on_account(JObj) ->
-    State = wh_json:get_value(<<"pvt_number_state">>, JObj, <<"unknown">>),
-    Number = wh_json:get_value(<<"_id">>, JObj),
-    update_numbers_on_account(Number, State, find_account_id(JObj)).
-
-update_numbers_on_account(Number, State) ->
-    Num = wnm_util:normalize_number(Number),
-    Db = wnm_util:number_to_db_name(Num),
-    case couch_mgr:open_doc(Db, Num) of
-        {error, _R} ->
-            lager:debug("unable to load ~s for update on account to ~s: ~p", [Number, State, _R]),
-            {error, not_found};
-        {ok, JObj} ->
-            update_numbers_on_account(Number, State, find_account_id(JObj))
-    end.
-
-update_numbers_on_account(_, _, undefined) ->
-    {error, no_account_id};
-update_numbers_on_account(Number, State, AccountId) ->
-    Db = wh_util:format_account_id(AccountId, encoded),
-    case couch_mgr:open_doc(Db, AccountId) of
-        {error, _R}=E ->
-            lager:debug("failed to load account definition when adding '~s': ~p", [Number, _R]),
-            E;
-        {ok, JObj} ->
-            lager:debug("updating number ~s pvt state to '~s' on account definition ~s", [Number, State, AccountId]),
-            Migrate = wh_json:get_value(<<"pvt_wnm_numbers">>, JObj, []),
-            Updated = lists:foldl(fun(<<"numbers">>, J) when Migrate =/= [] ->
-                                          N = wh_json:get_value(<<"pvt_wnm_in_service">>, J, []),
-                                          wh_json:set_value(<<"pvt_wnm_in_service">>, N ++ Migrate,
-                                                            wh_json:delete_key(<<"pvt_wnm_numbers">>, J));
-                                     (<<"numbers">>, J) when Migrate =:= [] ->
-                                          wh_json:delete_key(<<"pvt_wnm_numbers">>, J);
-                                     (S, J) when S =:= State ->
-                                          N = wh_json:get_value(<<"pvt_wnm_", S/binary>>, JObj, []),
-                                          wh_json:set_value(<<"pvt_wnm_", S/binary>>, [Number|lists:delete(Number,N)], J);
-                                     (S, J) ->
-                                          N = wh_json:get_value(<<"pvt_wnm_", S/binary>>, JObj, []),
-                                          wh_json:set_value(<<"pvt_wnm_", S/binary>>, lists:delete(Number,N), J)
-                                  end, JObj, [<<"numbers">>|?WNM_NUMBER_STATUS]),
-            Cleaned = lists:foldl(fun(S, J) ->
-                                          Nums = wh_json:get_value(<<"pvt_wnm_", S/binary>>, J, []),
-                                          Clean = ordsets:to_list(ordsets:from_list(Nums)),
-                                          wh_json:set_value(<<"pvt_wnm_", S/binary>>, Clean, J)
-                                  end, Updated, ?WNM_NUMBER_STATUS),
-            case couch_mgr:save_doc(Db, Cleaned) of
-                {ok, AccountDef} ->
-                    lager:debug("updated the account definition"),
-                    couch_mgr:ensure_saved(?WH_ACCOUNTS_DB, AccountDef);
-                {error, _R}=E ->
-                    lager:debug("failed to save account definition when adding '~s': ~p", [Number, _R]),
-                    E
-            end
-    end.
-
-%%--------------------------------------------------------------------
-%% @private
 %% @doc
 %% Check all the fields that might have an account id in hierarchical
 %% order
@@ -344,6 +237,37 @@ find_account_id(JObj) ->
                    end
                  ],
     lists:foldl(fun(F, A) -> F(A) end, undefined, SearchFuns).
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
+%% This function will return a list of all number database names
+%% @end
+%%--------------------------------------------------------------------
+-spec get_all_number_dbs/0 :: () -> [ne_binary(),...] | [].
+get_all_number_dbs() ->
+    {ok, Databases} = couch_mgr:db_info(),
+    [Db || Db <- Databases, is_number_db(Db)].
+
+is_number_db(<<"numbers/", _/binary>>) -> true;
+is_number_db(<<"numbers%2f", _/binary>>) -> true;
+is_number_db(<<"numbers%2F", _/binary>>) -> true;
+is_number_db(_) -> false.
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
+%% 
+%% @end
+%%--------------------------------------------------------------------
+-spec are_jobjs_identical/2 :: ('undefined' | wh_json:json_object(), 'undefined' | wh_json:json_object()) -> boolean().
+are_jobjs_identical(undefined, undefined) -> true;
+are_jobjs_identical(undefined, _) -> false;
+are_jobjs_identical(_, undefined) -> false;
+are_jobjs_identical(JObj1, JObj2) ->
+    [KV || {_, V}=KV <- wh_json:to_proplist(JObj1), (not wh_util:is_empty(V))]
+        =:=
+    [KV || {_, V}=KV <- wh_json:to_proplist(JObj2), (not wh_util:is_empty(V))].
 
 %% PROPER TESTING
 %%

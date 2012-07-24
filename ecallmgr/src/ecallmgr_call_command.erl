@@ -17,9 +17,11 @@
 -type io_device() :: pid() | fd().
 -type file_stream_state() :: {'undefined' | io_device(), binary()}.
 
--spec exec_cmd/4 :: (atom(), ne_binary(), wh_json:json_object(), pid()) -> 'ok' |
-                                                                           'timeout' |
-                                                                           {'error', ne_binary()}.
+-spec exec_cmd/4 :: (atom(), ne_binary(), wh_json:json_object(), pid()) ->
+                            'ok' |
+                            'error' |
+                            ecallmgr_util:send_cmd_ret() |
+                            [ecallmgr_util:send_cmd_ret(),...].
 exec_cmd(Node, UUID, JObj, ControlPID) ->
     DestID = wh_json:get_value(<<"Call-ID">>, JObj),
     App = wh_json:get_value(<<"Application-Name">>, JObj),
@@ -34,7 +36,9 @@ exec_cmd(Node, UUID, JObj, ControlPID) ->
                 {AppName, noop} ->
                     ecallmgr_call_control:event_execute_complete(ControlPID, UUID, AppName);
                 {AppName, AppData} ->
-                    ecallmgr_util:send_cmd(Node, UUID, AppName, AppData)
+                    ecallmgr_util:send_cmd(Node, UUID, AppName, AppData);
+                Apps when is_list(Apps) ->
+                    [ecallmgr_util:send_cmd(Node, UUID, AppName, AppData) || {AppName, AppData} <- Apps]
             end;
         false ->
             lager:debug("command ~s not meant for us but for ~s", [wh_json:get_value(<<"Application-Name">>, JObj), DestID]),
@@ -48,9 +52,11 @@ exec_cmd(Node, UUID, JObj, ControlPID) ->
 %% the FS ESL via mod_erlang_event
 %% @end
 %%--------------------------------------------------------------------
--spec get_fs_app/4 :: (atom(), ne_binary(), wh_json:json_object(), ne_binary()) -> {ne_binary(), ne_binary() | 'noop'} |
-                                                                                   {'return', 'ok'} |
-                                                                                   {'error', ne_binary()}.
+-type fs_app() :: {ne_binary(), ne_binary() | 'noop'}.
+-spec get_fs_app/4 :: (atom(), ne_binary(), wh_json:json_object(), ne_binary()) -> fs_app() |
+                                                                                   {'return', 'error'} |
+                                                                                   {'error', ne_binary()} |
+                                                                                   [fs_app(),...].
 get_fs_app(_Node, _UUID, JObj, <<"noop">>) ->
     case wapi_dialplan:noop_v(JObj) of
         false ->
@@ -74,8 +80,13 @@ get_fs_app(Node, UUID, JObj, <<"play">>) ->
     case wapi_dialplan:play_v(JObj) of
         false -> {'error', <<"play failed to execute as JObj did not validate">>};
         true ->
-            F = ecallmgr_util:media_path(wh_json:get_value(<<"Media-Name">>, JObj), UUID),
+            F = ecallmgr_util:media_path(wh_json:get_value(<<"Media-Name">>, JObj), UUID, JObj),
             'ok' = set_terminators(Node, UUID, wh_json:get_value(<<"Terminators">>, JObj)),
+
+            _ = case wh_json:get_value(<<"Group-ID">>, JObj) of
+                    undefined -> ok;
+                    GID -> set(Node, UUID, <<"media_group_id=", (GID)/binary>>)
+                end,
 
             %% if Leg is set, use uuid_broadcast; otherwise use playback
             case wh_json:get_value(<<"Leg">>, JObj) of
@@ -86,11 +97,10 @@ get_fs_app(Node, UUID, JObj, <<"play">>) ->
             end
     end;
 
-get_fs_app(_Node, UUID, JObj, <<"playstop">>) ->
+get_fs_app(_Node, _UUID, JObj, <<"playstop">>) ->
     case wapi_dialplan:playstop_v(JObj) of
         false -> {'error', <<"playstop failed to execute as JObj did not validate">>};
-        true ->
-            {<<"playstop">>, UUID}
+        true -> {<<"playstop">>, <<>>}
     end;
 
 get_fs_app(_Node, _UUID, JObj, <<"hangup">>) ->
@@ -107,8 +117,8 @@ get_fs_app(_Node, UUID, JObj, <<"play_and_collect_digits">>) ->
             Max = wh_json:get_value(<<"Maximum-Digits">>, JObj),
             Timeout = wh_json:get_value(<<"Timeout">>, JObj),
             Terminators = wh_json:get_value(<<"Terminators">>, JObj),
-            Media = <<$', (ecallmgr_util:media_path(wh_json:get_value(<<"Media-Name">>, JObj), UUID))/binary, $'>>,
-            InvalidMedia = <<$', (ecallmgr_util:media_path(wh_json:get_value(<<"Failed-Media-Name">>, JObj), UUID))/binary, $'>>,
+            Media = <<$', (ecallmgr_util:media_path(wh_json:get_value(<<"Media-Name">>, JObj), UUID, JObj))/binary, $'>>,
+            InvalidMedia = <<$', (ecallmgr_util:media_path(wh_json:get_value(<<"Failed-Media-Name">>, JObj), UUID, JObj))/binary, $'>>,
             Tries = wh_json:get_value(<<"Media-Tries">>, JObj),
             Regex = wh_json:get_value(<<"Digits-Regex">>, JObj),
             Storage = <<"collected_digits">>,
@@ -207,10 +217,60 @@ get_fs_app(Node, UUID, JObj, <<"store">>) ->
             end
     end;
 
-get_fs_app(_Node, _UUID, JObj, <<"tones">>) ->
+get_fs_app(Node, UUID, JObj, <<"store_fax">> = App) ->
+    case wapi_dialplan:store_fax_v(JObj) of
+        false -> {'error', <<"store_fax failed to execute as JObj did not validate">>};
+        true ->
+            File = ecallmgr_util:fax_filename(UUID),
+            lager:debug("attempting to store fax on ~s: ~s", [Node, File]),
+            case wh_json:get_value(<<"Media-Transfer-Method">>, JObj) of
+                <<"put">> = Method ->
+                    Url = wh_util:to_list(wh_json:get_value(<<"Media-Transfer-Destination">>, JObj)),
+                    lager:debug("streaming via HTTP(~s) to ~s", [Method, Url]),
+
+                    Args = list_to_binary([Url, <<" ">>, File]),
+                    lager:debug("execute on node ~s: http_put(~s)", [Node, Args]),
+                    case freeswitch:api(Node, http_put, wh_util:to_list(Args)) of
+                        {ok, <<"+OK", _/binary>>} ->
+                            lager:debug("successfully stored fax"),
+                            send_store_fax_call_event(UUID, <<"success">>),
+                            {App, noop};
+                        {ok, _Err} ->
+                            lager:debug("store fax failed: ~s", [_Err]),
+                            send_store_fax_call_event(UUID, <<"failure">>),
+                            {App, noop};
+                        {error, _E} ->
+                            lager:debug("error executing http_put: ~p", [_E]),
+                            send_store_fax_call_event(UUID, <<"failure">>),
+                            {App, noop};
+                        timeout ->
+                            lager:debug("timeout waiting for http_put"),
+                            send_store_fax_call_event(UUID, <<"timeout">>),
+                            {App, noop}
+                    end;
+                _Method ->
+                    lager:debug("invalid media transfer method for storing fax: ~s", [_Method]),
+                    {error, <<"invalid media transfer method">>}
+            end
+    end;
+
+get_fs_app(_Node, _UUID, JObj, <<"send_dtmf">>) ->
+    case wapi_dialplan:send_dtmf_v(JObj) of
+        false -> {'error', <<"send_dtmf failed to execute as JObj did not validate">>};
+        true ->
+            DTMFs = wh_json:get_value(<<"DTMFs">>, JObj),
+            Duration = case wh_json:get_binary_value(<<"Duration">>, JObj) of
+                           undefined -> <<>>;
+                           D -> [<<"@">>, D]
+                       end,
+            {<<"send_dtmf">>, iolist_to_binary([DTMFs, Duration])}
+    end;
+
+get_fs_app(Node, UUID, JObj, <<"tones">>) ->
     case wapi_dialplan:tones_v(JObj) of
         false -> {'error', <<"tones failed to execute as JObj did not validate">>};
         true ->
+            'ok' = set_terminators(Node, UUID, wh_json:get_value(<<"Terminators">>, JObj)),
             Tones = wh_json:get_value(<<"Tones">>, JObj, []),
             FSTones = [begin
                            Vol = case wh_json:get_value(<<"Volume">>, Tone) of
@@ -241,11 +301,20 @@ get_fs_app(Node, UUID, JObj, <<"ring">>) ->
     _ = case wh_json:get_value(<<"Ringback">>, JObj) of
             undefined -> ok;
             Ringback ->
-                Stream = ecallmgr_util:media_path(Ringback, extant, UUID),
+                Stream = ecallmgr_util:media_path(Ringback, extant, UUID, JObj),
                 lager:debug("custom ringback: ~s", [Stream]),
                 _ = ecallmgr_util:send_cmd(Node, UUID, <<"set">>, <<"ringback=", Stream/binary>>)
         end,
     {<<"ring_ready">>, <<>>};
+
+%% receive a fax from the caller
+get_fs_app(Node, UUID, _JObj, <<"receive_fax">>) ->
+    _ = set(Node, UUID, <<"fax_enable_t38_request=true">>),
+    _ = set(Node, UUID, <<"fax_enable_t38=true">>),
+
+    [{<<"playback">>, <<"silence_stream://2000">>}
+     ,{<<"rxfax">>, ecallmgr_util:fax_filename(UUID)}
+    ];
 
 get_fs_app(_Node, _UUID, _JObj, <<"hold">>) ->
     {<<"endless_playback">>, <<"${hold_music}">>};
@@ -298,9 +367,12 @@ get_fs_app(Node, UUID, JObj, <<"bridge">>) ->
                                   case wh_json:get_integer_value(<<"Timeout">>, JObj) of
                                       undefined ->
                                           DP;
-                                      TO when TO > 0 ->
+                                      TO when TO > 2 ->
                                           lager:debug("bridge will be attempted for ~p seconds", [TO]),
-                                          [{"application", "set call_timeout=" ++ wh_util:to_list(TO)}|DP]
+                                          [{"application", "set call_timeout=" ++ wh_util:to_list(TO)}|DP];
+                                      _ ->
+                                          lager:debug("bridge timeout invalid overwritting with 20 seconds", []),
+                                          [{"application", "set call_timeout=20"}|DP]
                                   end
                           end
                           ,fun(DP) ->
@@ -309,7 +381,7 @@ get_fs_app(Node, UUID, JObj, <<"bridge">>) ->
                                            {ok, RBSetting} = ecallmgr_util:get_setting(<<"default_ringback">>, <<"%(2000,4000,440,480)">>),
                                            [{"application", "set ringback=" ++ wh_util:to_list(RBSetting)}|DP];
                                        Ringback ->
-                                           Stream = ecallmgr_util:media_path(Ringback, extant, UUID),
+                                           Stream = ecallmgr_util:media_path(Ringback, extant, UUID, JObj),
                                            lager:debug("bridge has custom ringback: ~s", [Stream]),
                                            [{"application", <<"set ringback=", Stream/binary>>},
                                             {"application", "set instant_ringback=true"}
@@ -327,14 +399,20 @@ get_fs_app(Node, UUID, JObj, <<"bridge">>) ->
                                                        false -> DP
                                                    end;
                                                Media ->
-                                                   Stream = ecallmgr_util:media_path(Media, extant, UUID),
+                                                   Stream = ecallmgr_util:media_path(Media, extant, UUID, JObj),
                                                    lager:debug("bridge has custom music-on-hold in channel vars: ~s", [Stream]),
                                                    [{"application", <<"set hold_music=", Stream/binary>>}|DP]
                                            end;
                                        Media ->
-                                           Stream = ecallmgr_util:media_path(Media, extant, UUID),
+                                           Stream = ecallmgr_util:media_path(Media, extant, UUID, JObj),
                                            lager:debug("bridge has custom music-on-hold: ~s", [Stream]),
                                            [{"application", <<"set hold_music=", Stream/binary>>}|DP]
+                                   end
+                           end
+                          ,fun(DP) ->
+                                   case wh_json:is_true(<<"Secure-RTP">>, JObj, false) of
+                                       true -> [{"application", "set sip_secure_media=true"}|DP];
+                                       false -> DP
                                    end
                            end
                           ,fun(DP) ->
@@ -581,7 +659,7 @@ get_fs_app(_Node, _UUID, _JObj, _App) ->
 -spec get_fs_kv/3 :: (ne_binary(), ne_binary(), ne_binary()) -> binary().
 get_fs_kv(<<"Hold-Media">>, Media, UUID) ->
     list_to_binary(["hold_music="
-                    ,wh_util:to_list(ecallmgr_util:media_path(Media, extant, UUID))
+                    ,wh_util:to_list(ecallmgr_util:media_path(Media, extant, UUID, wh_json:new()))
                    ]);
 get_fs_kv(Key, Val, _) ->
     case lists:keyfind(Key, 1, ?SPECIAL_CHANNEL_VARS) of
@@ -590,72 +668,6 @@ get_fs_kv(Key, Val, _) ->
         {_, Prefix} ->
             list_to_binary([Prefix, "=", wh_util:to_list(Val)])
     end.
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% send the SendMsg proplist to the freeswitch node
-%% @end
-%%--------------------------------------------------------------------
--type send_cmd_ret() :: fs_sendmsg_ret() | fs_api_ret().
--spec send_cmd/4 :: (atom(), ne_binary(), ne_binary() | string(), ne_binary() | string()) -> send_cmd_ret().
-send_cmd(Node, UUID, <<"hangup">>, _) ->
-    lager:debug("terminate call on node ~s", [Node]),
-    _ = ecallmgr_util:fs_log(Node, "whistle terminating call", []),
-    freeswitch:api(Node, uuid_kill, wh_util:to_list(UUID));
-send_cmd(Node, UUID, <<"record_call">>, Cmd) ->
-    lager:debug("execute on node ~s: uuid_record(~s)", [Node, Cmd]),
-    case freeswitch:api(Node, uuid_record, wh_util:to_list(Cmd)) of
-        {ok, _}=Ret ->
-            lager:debug("executing uuid_record returned ~p", [Ret]),
-            Ret;
-        {error, <<"-ERR ", E/binary>>} ->
-            lager:debug("error executing uuid_record: ~s", [E]),
-            Evt = list_to_binary([ecallmgr_util:create_masquerade_event(<<"record_call">>, <<"RECORD_STOP">>)
-                                  ,",whistle_application_response="
-                                  ,E
-                                 ]),
-            lager:debug("publishing event: ~s", [Evt]),
-            send_cmd(Node, UUID, "application", Evt),
-            {error, E};
-        timeout ->
-            lager:debug("timeout executing uuid_record"),
-            Evt = list_to_binary([ecallmgr_util:create_masquerade_event(<<"record_call">>, <<"RECORD_STOP">>)
-                                  ,",whistle_application_response=timeout"
-                                 ]),
-            lager:debug("publishing event: ~s", [Evt]),
-            send_cmd(Node, UUID, "application", Evt),
-            {error, timeout}
-    end;
-send_cmd(Node, UUID, <<"playstop">>, Args) ->
-    lager:debug("execute on node ~s: uuid_break(~s)", [Node, UUID]),
-    freeswitch:api(Node, uuid_break, wh_util:to_list(Args));
-
-send_cmd(Node, UUID, <<"unbridge">>, _) ->
-    lager:debug("execute on node ~s: uuid_park(~s)", [Node, UUID]),
-    freeswitch:api(Node, uuid_park, wh_util:to_list(UUID));
-
-send_cmd(Node, _UUID, <<"broadcast">>, Args) ->
-    lager:debug("execute on node ~s: uuid_broadcast(~s)", [Node, Args]),
-    Resp = freeswitch:api(Node, uuid_broadcast, wh_util:to_list(iolist_to_binary(Args))),
-    lager:debug("broadcast resulted in: ~p", [Resp]),
-    Resp;
-
-send_cmd(Node, UUID, <<"xferext">>, Dialplan) ->
-    XferExt = [begin
-                   _ = ecallmgr_util:fs_log(Node, "whistle queuing command in 'xferext' extension: ~s", [V]),
-                   lager:debug("building xferext on node ~s: ~s", [Node, V]),
-                   {wh_util:to_list(K), wh_util:to_list(V)}
-               end || {K, V} <- Dialplan],
-    ok = freeswitch:sendmsg(Node, UUID, [{"call-command", "xferext"} | XferExt]),
-    ecallmgr_util:fs_log(Node, "whistle transfered call to 'xferext' extension", []);
-send_cmd(Node, UUID, AppName, Args) ->
-    lager:debug("execute on node ~s: ~s(~s)", [Node, AppName, Args]),
-    _ = ecallmgr_util:fs_log(Node, "whistle executing ~s ~s", [AppName, Args]),
-    freeswitch:sendmsg(Node, UUID, [{"call-command", "execute"}
-                                    ,{"execute-app-name", wh_util:to_list(AppName)}
-                                    ,{"execute-app-arg", wh_util:to_list(Args)}
-                                   ]).
 
 %%--------------------------------------------------------------------
 %% @private
@@ -689,6 +701,7 @@ amqp_stream(DestQ, F, State, Headers, Seq) ->
             %% send msg
             Msg = [{<<"Media-Content">>, Data}
                    ,{<<"Media-Sequence-ID">>, Seq}
+                   ,{<<"Msg-ID">>, wh_util:to_binary(wh_util:current_tstamp())}
                    | Headers],
             {ok, JSON} = wapi_dialplan:store_amqp_resp(Msg),
             amqp_util:targeted_publish(DestQ, JSON, <<"application/json">>),
@@ -696,6 +709,7 @@ amqp_stream(DestQ, F, State, Headers, Seq) ->
         eof ->
             Msg = [{<<"Media-Content">>, <<"eof">>}
                    ,{<<"Media-Sequence-ID">>, Seq}
+                   ,{<<"Msg-ID">>, wh_util:to_binary(wh_util:current_tstamp())}
                    | Headers],
             {ok, JSON} = wapi_dialplan:store_amqp_resp(Msg),
             amqp_util:targeted_publish(DestQ, JSON, <<"application/json">>),
@@ -730,13 +744,26 @@ stream_over_http(Node, UUID, File, Method, JObj) ->
             JObj1 = wh_json:set_values([{<<"Media-Transfer-Results">>, MediaTransResults}
                                         ,{<<"Event-Name">>, <<"response">>}
                                         ,{<<"Event-Category">>, <<"call">>}
+                                        ,{<<"Msg-ID">>, wh_util:to_binary(wh_util:current_tstamp())}
                                        ], JObj),
+
+            case lists:member(StatusCode, ["200", "201", "202"]) of
+                true -> ok;
+                false ->                    
+                    wh_notify:system_alert("Failed to store media file ~s for call ~s on ~s "
+                                           ,[File, UUID, Node]
+                                           ,[{<<"Status-Code">>, wh_util:to_binary(StatusCode)}
+                                             |[{wh_util:to_binary(K), wh_util:to_binary(V)} || {K,V} <- RespHeaders]
+                                            ]
+                                          )
+            end,
 
             case wapi_dialplan:store_http_resp(JObj1) of
                 {ok, Payload} ->
                     lager:debug("ibrowse 'OK'ed with ~p publishing to ~s: ~s", [StatusCode, AppQ, Payload]),
                     amqp_util:targeted_publish(AppQ, Payload, <<"application/json">>);
                 {'error', Msg} ->
+
                     lager:debug("store via HTTP ~s errored: ~p", [Method, Msg])
             end;
         {'error', Error} ->
@@ -770,10 +797,12 @@ stream_file({Iod, _File}=State) ->
 %% @doc
 %% @end
 %%--------------------------------------------------------------------
--spec set_terminators/3 :: (atom(), ne_binary(), 'undefined' | binary()) -> 'ok' |
-                                                                            fs_api_ret().
+-spec set_terminators/3 :: (atom(), ne_binary(), 'undefined' | binary() | list()) -> 'ok' |
+                                                                                     fs_api_ret().
 set_terminators(_Node, _UUID, undefined) -> 'ok';
 set_terminators(Node, UUID, <<>>) -> set(Node, UUID, <<"playback_terminators=none">>);
+set_terminators(Node, UUID, <<"none">>) -> set(Node, UUID, <<"playback_terminators=none">>);
+set_terminators(Node, UUID, []) -> set(Node, UUID, <<"playback_terminators=none">>);
 set_terminators(Node, UUID, Ts) ->
     Terms = list_to_binary(["playback_terminators=", Ts]),
     set(Node, UUID, Terms).
@@ -787,7 +816,7 @@ set_terminators(Node, UUID, Ts) ->
 set(Node, UUID, Arg) ->
     case wh_util:to_binary(Arg) of
         <<"hold_music=", _/binary>> -> 
-            ecallmgr_fs_nodes:channel_set_import_moh(UUID, false);
+            ecallmgr_fs_nodes:channel_set_import_moh(Node, UUID, false);
         _Else -> ok
     end,
     ecallmgr_util:send_cmd(Node, UUID, "set", Arg).
@@ -801,7 +830,7 @@ set(Node, UUID, Arg) ->
 export(Node, UUID, Arg) ->
     case wh_util:to_binary(Arg) of
         <<"hold_music=", _/binary>> -> 
-            ecallmgr_fs_nodes:channel_set_import_moh(UUID, false);
+            ecallmgr_fs_nodes:channel_set_import_moh(Node, UUID, false);
         _Else -> ok
     end,
     ecallmgr_util:send_cmd(Node, UUID, "export", wh_util:to_list(Arg)).
@@ -846,8 +875,7 @@ send_fetch_call_event(Node, UUID, JObj) ->
                      ,{<<"Application-Response">>, <<>>}
                      | wh_api:default_headers(<<>>, <<"error">>, wh_util:to_binary(Type), ?APP_NAME, ?APP_VERSION)
                     ],
-            {ok, P2} = wapi_dialplan:error(Error),
-            amqp_util:callevt_publish(UUID, P2, event)
+            wapi_dialplan:publish_error(UUID, Error)
     end.
 
 %%--------------------------------------------------------------------
@@ -863,7 +891,7 @@ send_store_call_event(Node, UUID, MediaTransResults) ->
                ecallmgr_util:eventstr_to_proplist(Dump)
            catch
                _E:_R ->
-                   lager:debug("Failed get params from uuid_dump"),
+                   lager:debug("failed get params from uuid_dump"),
                    lager:debug("~p : ~p", [_E, _R]),
                    lager:debug("sending less interesting call_event message"),
                    []
@@ -881,6 +909,17 @@ send_store_call_event(Node, UUID, MediaTransResults) ->
                    CustomProp -> [{<<"Custom-Channel-Vars">>, wh_json:from_list(CustomProp)} | EvtProp1]
                end,
     wapi_call:publish_event(UUID, EvtProp2).
+
+-spec send_store_fax_call_event/2 :: (ne_binary(), ne_binary()) -> 'ok'.
+send_store_fax_call_event(UUID, Results) ->
+    Timestamp = wh_util:to_binary(wh_util:current_tstamp()),
+    Prop = [{<<"Msg-ID">>, Timestamp}
+            ,{<<"Call-ID">>, UUID}
+            ,{<<"Application-Name">>, <<"store_fax">>}
+            ,{<<"Application-Response">>, Results}
+            | wh_api:default_headers(<<"call_event">>, <<"CHANNEL_EXECUTE_COMPLETE">>, ?APP_NAME, ?APP_VERSION)
+           ],
+    wapi_call:publish_event(UUID, Prop).
 
 -spec create_dialplan_move_ccvs/4 :: (ne_binary(), atom(), ne_binary(), proplist()) -> proplist().
 create_dialplan_move_ccvs(Root, Node, UUID, DP) ->

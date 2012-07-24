@@ -1,10 +1,10 @@
 %%%-------------------------------------------------------------------
-%%% @author Karl anderson <karl@2600hz.org>
-%%% @copyright (C) 2011, VoIP INC
+%%% @copyright (C) 2011-2012, VoIP INC
 %%% @doc
 %%% handler for route requests, responds if callflows match
 %%% @end
-%%% Created : 30 Nov 2011 by Karl Anderson <karl@2600hz.org>
+%%% @contributors
+%%%   Karl Anderson
 %%%-------------------------------------------------------------------
 -module(cf_route_req).
 
@@ -81,6 +81,7 @@ send_route_response(JObj, Q) ->
     Resp = [{<<"Msg-ID">>, wh_json:get_value(<<"Msg-ID">>, JObj)}
             ,{<<"Routes">>, []}
             ,{<<"Method">>, <<"park">>}
-            | wh_api:default_headers(Q, ?APP_NAME, ?APP_VERSION)],
+            | wh_api:default_headers(Q, ?APP_NAME, ?APP_VERSION)
+           ],
     wapi_route:publish_resp(wh_json:get_value(<<"Server-ID">>, JObj), Resp),
     lager:debug("sent route response to park the call").

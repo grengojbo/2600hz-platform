@@ -26,13 +26,17 @@
 -export([wildcard_is_empty/1]).
 -export([callid_update/3]).
 
-%% gen_server callbacks
--export([init/1, handle_call/3, handle_cast/2, handle_info/2, handle_event/2
-         ,terminate/2, code_change/3]).
+%% gen_listener callbacks
+-export([init/1
+         ,handle_call/3
+         ,handle_cast/2
+         ,handle_info/2
+         ,handle_event/2
+         ,terminate/2
+         ,code_change/3
+        ]).
 
 -include("callflow.hrl").
-
--define(SERVER, ?MODULE).
 
 -define(CALL_SANITY_CHECK, 30000).
 
@@ -195,16 +199,15 @@ wildcard_is_empty(Call) ->
     Srv = whapps_call:kvs_fetch(cf_exe_pid, Call),
     wildcard_is_empty(Srv).
 
--spec relay_amqp/2 :: (wh_json:json_object(), proplist()) -> ok.
+-spec relay_amqp/2 :: (wh_json:json_object(), proplist()) -> any().
 relay_amqp(JObj, Props) ->
     case props:get_value(cf_module_pid, Props) of
         Pid when is_pid(Pid) ->
-            Pid ! {amqp_msg, JObj},
-            ok;
+            whapps_call_command:relay_event(Pid, JObj);
         _Else ->
             %% TODO: queue?
-            lager:debug("received event to relay while no module running, dropping: ~s", [wh_json:encode(JObj)]),
-            ok
+            {Category, Name} = wh_util:get_event_type(JObj),
+            lager:debug("received event to relay while no module running, dropping: ~s ~s", [Category, Name])
     end.
 
 %%%===================================================================
@@ -384,11 +387,7 @@ handle_info(_, State) ->
 %%--------------------------------------------------------------------
 handle_event(JObj, #state{cf_module_pid=Pid, call=Call}) ->
     CallId = whapps_call:call_id_direct(Call),
-    case {whapps_util:get_event_type(JObj), wh_json:get_value(<<"Call-ID">>, JObj)}of
-        {{<<"call_event">>, <<"channel_status_resp">>}, _} ->
-            {reply, [{cf_module_pid, Pid}]};
-        {{<<"call_event">>, <<"call_status_resp">>}, _} ->
-            {reply, [{cf_module_pid, Pid}]};
+    case {whapps_util:get_event_type(JObj), wh_json:get_value(<<"Call-ID">>, JObj)} of
         {{<<"call_event">>, <<"call_id_update">>},_} ->
             NewCallId = wh_json:get_value(<<"Call-ID">>, JObj),
             NewCtrlQ = wh_json:get_value(<<"Control-Queue">>, JObj),
@@ -497,7 +496,15 @@ launch_cf_module(#state{call=Call, flow=Flow}=State) ->
 spawn_cf_module(CFModule, Data, Call) ->
     {spawn_link(fun() ->
                         put(callid, whapps_call:call_id_direct(Call)),
-                        CFModule:handle(Data, Call)
+                        try
+                            CFModule:handle(Data, Call)
+                        catch
+                            _E:_R ->
+                                ST = erlang:get_stacktrace(),
+                                lager:debug("action ~s died unexpectedly (~s): ~p", [CFModule, _E, _R]),
+                                _ = [lager:debug("stacktrace: ~p", [S]) || S <- ST],
+                                throw(_R)
+                        end
                 end), CFModule}.
 
 %%--------------------------------------------------------------------

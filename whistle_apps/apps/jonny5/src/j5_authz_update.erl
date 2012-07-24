@@ -40,9 +40,10 @@ reconcile(Ledger, CCV, JObj) ->
         Time ->
             Debit = whapps_util:calculate_cost(Rate, RateIncr, 0, 0.0, Time + 60)
                 - whapps_util:calculate_cost(Rate, RateIncr, 0, 0.0, Time),
-            case j5_util:write_debit_to_ledger(Timestamp, Debit, JObj, Ledger) of
+            case j5_util:write_debit_to_ledger(Timestamp, wapi_money:dollars_to_units(Debit), JObj, Ledger) of
                 {error, conflict} -> ok;
                 {ok, _} ->
-                    lager:debug("debited $~w from ~s for 60 seconds of talk time at $~w/~ws", [Debit, Ledger, Rate, RateIncr])
+                    SessionId = j5_util:get_session_id(JObj),
+                    lager:debug("debited $~w from ~s for active session ~s at $~w/~ws", [Debit, Ledger, SessionId, Rate, RateIncr])
             end
     end.    

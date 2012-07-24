@@ -1,10 +1,11 @@
 %%%-------------------------------------------------------------------
-%%% @author James Aimonetti <james@2600hz.org>
-%%% @copyright (C) 2011, VoIP INC
+%%% @copyright (C) 2011-2012, VoIP INC
 %%% @doc
 %%% Utilities shared by a subset of whapps
 %%% @end
-%%% Created :  3 May 2011 by James Aimonetti <james@2600hz.org>
+%%% @contributors
+%%%   James Aimonetti
+%%%   Karl Anderson
 %%%-------------------------------------------------------------------
 -module(whapps_util).
 
@@ -14,9 +15,10 @@
 -export([get_all_accounts/0, get_all_accounts/1]).
 -export([get_account_by_realm/1,get_accounts_by_name/1]).
 -export([calculate_cost/5]).
+-export([get_master_account_id/0]).
+-export([find_oldest_doc/1]).
 -export([get_event_type/1, put_callid/1]).
 -export([get_call_termination_reason/1]).
--export([hangup_cause_to_alert_level/1]).
 -export([get_view_json/1, get_view_json/2]).
 -export([get_views_json/2]).
 -export([update_views/2, update_views/3]).
@@ -107,6 +109,53 @@ replicate_from_account(AccountDb, TargetDb, FilterDoc) ->
 %%--------------------------------------------------------------------
 %% @public
 %% @doc
+%% Find the system admin from the system_config if set, if not
+%% set it to the oldest acccount and return that.
+%% @end
+%%--------------------------------------------------------------------
+-spec get_master_account_id/0 :: () -> {'ok', ne_binary()} | {'error', _}.
+get_master_account_id() ->
+    case whapps_config:get(?WH_SYSTEM_CONFIG_ACCOUNT, <<"master_account_id">>) of
+        undefined ->            
+            case couch_mgr:get_results(?WH_ACCOUNTS_DB, <<"accounts/listing_by_id">>, [include_docs]) of
+                {error, _R}=E -> E;
+                {ok, Accounts} ->
+                    case find_oldest_doc([wh_json:get_value(<<"doc">>, Account) || Account <- Accounts]) of
+                        {error, _}=E -> E;
+                        {ok, OldestAccountId}=Ok ->
+                            lager:debug("setting ~s.master_account_id to ~s", [?WH_SYSTEM_CONFIG_ACCOUNT, OldestAccountId]),
+                            {ok, _} = whapps_config:set(?WH_SYSTEM_CONFIG_ACCOUNT, <<"master_account_id">>, OldestAccountId),
+                            Ok
+                    end
+            end;
+        Default -> {ok, Default}
+    end.
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
+%% Given a list of accounts this returns the id of the oldest
+%% @end
+%%--------------------------------------------------------------------  
+-spec find_oldest_doc/1 :: (wh_json:json_objects()) -> {'ok', ne_binary()} | {'error', _}.        
+find_oldest_doc([]) ->
+    {error, no_docs};
+find_oldest_doc(Docs) ->
+    First = hd(Docs),
+    {_, OldestDocID} = lists:foldl(fun(Doc, {Created, _}=Eldest) ->
+                                           case wh_json:get_integer_value(<<"pvt_created">>, Doc) of
+                                               Older when Older < Created  -> {Older, wh_json:get_value(<<"_id">>, Doc)};
+                                               _ -> Eldest
+                                           end
+                                   end
+                                   ,{wh_json:get_integer_value(<<"pvt_created">>, First), wh_json:get_value(<<"_id">>, First)}
+                                   ,Docs),
+    
+    {ok, OldestDocID}.
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
 %% This function will return a list of all account database names
 %% in the requested encoding
 %% @end
@@ -135,7 +184,7 @@ get_account_by_realm(Realm) ->
     case wh_cache:peek({?MODULE, account_by_realm, Realm}) of
         {ok, _}=Ok -> Ok;
         {error, not_found} ->
-            case couch_mgr:get_results(?WH_ACCOUNTS_DB, ?AGG_LIST_BY_REALM, [{<<"key">>, Realm}]) of
+            case couch_mgr:get_results(?WH_ACCOUNTS_DB, ?AGG_LIST_BY_REALM, [{key, Realm}]) of
                 {ok, [JObj]} ->
                     AccountDb = wh_json:get_value([<<"value">>, <<"account_db">>], JObj),
                     wh_cache:store({?MODULE, account_by_realm, Realm}, AccountDb),
@@ -163,7 +212,7 @@ get_accounts_by_name(Name) ->
     case wh_cache:peek({?MODULE, account_by_name, Name}) of
         {ok, _}=Ok -> Ok;
         {error, not_found} ->
-            case couch_mgr:get_results(?WH_ACCOUNTS_DB, ?AGG_LIST_BY_NAME, [{<<"key">>, Name}]) of
+            case couch_mgr:get_results(?WH_ACCOUNTS_DB, ?AGG_LIST_BY_NAME, [{key, Name}]) of
                 {ok, [JObj]} -> 
                     AccountDb = wh_json:get_value([<<"value">>, <<"account_db">>], JObj),
                     wh_cache:store({?MODULE, account_by_name, Name}, AccountDb),                    
@@ -234,27 +283,6 @@ calculate_cost(R, RI, RM, Sur, Secs) ->
         false -> Sur + ((RM / 60) * R) + ( wh_util:ceiling((Secs - RM) / RI) * ((RI / 60) * R))
     end.
 
-hangup_cause_to_alert_level(<<"UNALLOCATED_NUMBER">>) ->
-    <<"warning">>;
-hangup_cause_to_alert_level(<<"NO_ROUTE_DESTINATION">>) ->
-    <<"warning">>;
-hangup_cause_to_alert_level(<<"USER_BUSY">>) ->
-    <<"warning">>;
-hangup_cause_to_alert_level(<<"NORMAL_UNSPECIFIED">>) ->
-    <<"warning">>;
-hangup_cause_to_alert_level(<<"ORIGINATOR_CANCEL">>) ->
-    <<"info">>;
-hangup_cause_to_alert_level(<<"NO_ANSWER">>) ->
-    <<"info">>;
-hangup_cause_to_alert_level(<<"LOSE_RACE">>) ->
-    <<"info">>;
-hangup_cause_to_alert_level(<<"ATTENDED_TRANSFER">>) ->
-    <<"info">>;
-hangup_cause_to_alert_level(<<"CALL_REJECTED">>) ->
-    <<"info">>;
-hangup_cause_to_alert_level(_) ->
-    <<"error">>.
-
 %%--------------------------------------------------------------------
 %% @public
 %% @doc
@@ -305,22 +333,18 @@ update_views(Db, Views) ->
     update_views(Db, Views, false).
 
 update_views(Db, Views, Remove) ->
-    ViewOptions = [{<<"startkey">>, <<"_design/">>}
-                   ,{<<"endkey">>, <<"_e">>}
-                   ,{<<"include_docs">>, true}
-                  ],
-    case couch_mgr:get_results(Db, <<"_all_docs">>, ViewOptions) of
-        {ok, Found} ->
-            update_views(Found, Db, Views, Remove);
-        {error, _} ->
+    case couch_mgr:all_design_docs(Db, [include_docs]) of
+        {ok, Found} -> update_views(Found, Db, Views, Remove);
+        {error, _R} -> 
+            lager:debug("unable to fetch current design docs: ~p", [_R]),
             ok
-    end. 
+    end.
 
 update_views([], _, [], _) ->
     ok;
 update_views([], Db, [{Id,View}|Views], Remove) ->
     lager:debug("adding view '~s' to '~s'", [Id, Db]),
-    couch_mgr:ensure_saved(Db, View),
+    _ = couch_mgr:ensure_saved(Db, View),
     update_views([], Db, Views, Remove);
 update_views([Found|Finds], Db, Views, Remove) ->
     Id = wh_json:get_value(<<"id">>, Found),
@@ -329,7 +353,7 @@ update_views([Found|Finds], Db, Views, Remove) ->
     case props:get_value(Id, Views) of
         undefined when Remove -> 
             lager:debug("removing view '~s' from '~s'", [Id, Db]),
-            couch_mgr:del_doc(Db, Doc),
+            _ = couch_mgr:del_doc(Db, Doc),
             update_views(Finds, Db, props:delete(Id, Views), Remove);
         undefined ->
             update_views(Finds, Db, props:delete(Id, Views), Remove);
@@ -339,7 +363,7 @@ update_views([Found|Finds], Db, Views, Remove) ->
         View2 ->
             lager:debug("updating view '~s' in '~s'", [Id, Db]),
             Rev = wh_json:get_value(<<"_rev">>, Doc),
-            couch_mgr:ensure_saved(Db, wh_json:set_value(<<"_rev">>, Rev, View2)),
+            _ = couch_mgr:ensure_saved(Db, wh_json:set_value(<<"_rev">>, Rev, View2)),
             update_views(Finds, Db, props:delete(Id, Views), Remove)
     end.
 

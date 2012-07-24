@@ -16,45 +16,57 @@
 -export([optional_bridge_req_headers/0]).
 -export([optional_bridge_req_endpoint_headers/0]).
 
--export([bridge/1, bridge_v/1, bridge_endpoint/1, bridge_endpoint_v/1]).
--export([store/1, store_v/1, store_amqp_resp/1, store_amqp_resp_v/1
-         ,store_http_resp/1, store_http_resp_v/1]).
--export([noop/1, noop_v/1]).
--export([fetch/1, fetch_v/1]).
--export([respond/1, respond_v/1]).
--export([redirect/1, redirect_v/1]).
--export([progress/1, progress_v/1]).
--export([ring/1, ring_v/1]).
--export([execute_extension/1, execute_extension_v/1]).
--export([play/1, play_v/1, playstop/1, playstop_v/1]).
--export([record/1, record_v/1]).
--export([record_call/1, record_call_v/1]).
--export([answer/1, answer_v/1]).
--export([hold/1, hold_v/1]).
--export([park/1, park_v/1]).
--export([play_and_collect_digits/1, play_and_collect_digits_v/1]).
--export([call_pickup/1, call_pickup_v/1]).
--export([hangup/1, hangup_v/1]).
--export([say/1, say_v/1]).
--export([sleep/1, sleep_v/1]).
--export([tone_detect/1, tone_detect_v/1]).
--export([set/1, set_v/1]).
--export([tones/1, tones_req_tone/1, tones_v/1, tones_req_tone_v/1]).
--export([tones_req_tone_headers/1]).
--export([conference/1, conference_v/1]).
--export([originate_ready/1, originate_ready_v/1
+-export([bridge/1, bridge_v/1, bridge_endpoint/1, bridge_endpoint_v/1
+         ,store/1, store_v/1, store_amqp_resp/1, store_amqp_resp_v/1
+         ,store_http_resp/1, store_http_resp_v/1
+         ,noop/1, noop_v/1
+         ,fetch/1, fetch_v/1
+         ,respond/1, respond_v/1
+         ,redirect/1, redirect_v/1
+         ,progress/1, progress_v/1
+         ,ring/1, ring_v/1
+         ,receive_fax/1, receive_fax_v/1
+         ,store_fax/1, store_fax_v/1
+         ,execute_extension/1, execute_extension_v/1
+         ,play/1, play_v/1, playstop/1, playstop_v/1
+         ,record/1, record_v/1
+         ,record_call/1, record_call_v/1
+         ,answer/1, answer_v/1
+         ,hold/1, hold_v/1
+         ,park/1, park_v/1
+         ,play_and_collect_digits/1, play_and_collect_digits_v/1
+         ,call_pickup/1, call_pickup_v/1
+         ,hangup/1, hangup_v/1
+         ,say/1, say_v/1
+         ,sleep/1, sleep_v/1
+         ,tone_detect/1, tone_detect_v/1
+         ,set/1, set_v/1
+         ,send_dtmf/1, send_dtmf_v/1
+         ,tones/1, tones_req_tone/1, tones_v/1, tones_req_tone_v/1
+         ,tones_req_tone_headers/1
+         ,conference/1, conference_v/1
+         ,originate_ready/1, originate_ready_v/1
          ,originate_execute/1, originate_execute_v/1
         ]).
 
--export([queue/1, queue_v/1]).
--export([error/1, error_v/1]).
+-export([queue/1, queue_v/1
+         ,error/1, error_v/1
+        ]).
 
--export([bind_q/2, unbind_q/2]).
+%% API Helpers
+-export([dial_method_single/0
+         ,dial_method_simultaneous/0
+        ]).
 
--export([publish_action/2, publish_action/3]).
--export([publish_event/2, publish_event/3]).
--export([publish_command/2, publish_command/3]).
--export([publish_originate_ready/2, publish_originate_ready/3
+-export([bind_q/2
+         ,unbind_q/2
+        ]).
+
+-export([publish_action/2, publish_action/3
+         ,publish_error/2, publish_error/3
+         ,publish_event/2, publish_event/3
+         ,publish_command/2, publish_command/3
+         ,publish_originate_ready/2, publish_originate_ready/3
          ,publish_originate_execute/2, publish_originate_execute/3
         ]).
 
@@ -186,6 +198,26 @@ store_http_resp_v(Prop) when is_list(Prop) ->
     wh_api:validate(Prop, ?STORE_HTTP_RESP_HEADERS, ?STORE_HTTP_RESP_VALUES, ?STORE_HTTP_RESP_TYPES);
 store_http_resp_v(JObj) ->
     store_http_resp_v(wh_json:to_proplist(JObj)).
+
+%%--------------------------------------------------------------------
+%% @doc Create a DTMF (or DTMFs) on the channel - see wiki
+%% Takes proplist, creates JSON string or error
+%% @end
+%%--------------------------------------------------------------------
+-spec send_dtmf/1 :: (api_terms()) -> api_formatter_return() .
+send_dtmf(Prop) when is_list(Prop) ->
+    case send_dtmf_v(Prop) of
+        true -> wh_api:build_message(Prop, ?SEND_DTMF_HEADERS, ?OPTIONAL_SEND_DTMF_HEADERS);
+        false -> {error, "Prop failed validation for send_dtmf"}
+    end;
+send_dtmf(JObj) ->
+    send_dtmf(wh_json:to_proplist(JObj)).
+
+-spec send_dtmf_v/1 :: (api_terms()) -> boolean().
+send_dtmf_v(Prop) when is_list(Prop) ->
+    wh_api:validate(Prop, ?SEND_DTMF_HEADERS, ?SEND_DTMF_VALUES, ?SEND_DTMF_TYPES);
+send_dtmf_v(JObj) ->
+    send_dtmf_v(wh_json:to_proplist(JObj)).
 
 %%--------------------------------------------------------------------
 %% @doc Create a tone on the channel - see wiki
@@ -419,6 +451,46 @@ ring_v(Prop) when is_list(Prop) ->
     wh_api:validate(Prop, ?RING_REQ_HEADERS, ?RING_REQ_VALUES, ?RING_REQ_TYPES);
 ring_v(JObj) ->
     ring_v(wh_json:to_proplist(JObj)).
+
+%%--------------------------------------------------------------------
+%% @doc Receive a fax, storing it to local disk - see wiki
+%% Takes proplist, creates JSON string or error
+%% @end
+%%--------------------------------------------------------------------
+-spec receive_fax/1 :: (api_terms()) -> api_formatter_return().
+receive_fax(Prop) when is_list(Prop) ->
+    case receive_fax_v(Prop) of
+        true -> wh_api:build_message(Prop, ?RECV_FAX_HEADERS, ?OPTIONAL_RECV_FAX_HEADERS);
+        false -> {error, "Proplist failed validation for receive_fax"}
+    end;
+receive_fax(JObj) ->
+    receive_fax(wh_json:to_proplist(JObj)).
+
+-spec receive_fax_v/1 :: (api_terms()) -> boolean().
+receive_fax_v(Prop) when is_list(Prop) ->
+    wh_api:validate(Prop, ?RECV_FAX_HEADERS, ?RECV_FAX_VALUES, ?RECV_FAX_TYPES);
+receive_fax_v(JObj) ->
+    receive_fax_v(wh_json:to_proplist(JObj)).
+
+%%--------------------------------------------------------------------
+%% @doc Store a fax, storing it to the DB - see wiki
+%% Takes proplist, creates JSON string or error
+%% @end
+%%--------------------------------------------------------------------
+-spec store_fax/1 :: (api_terms()) -> api_formatter_return().
+store_fax(Prop) when is_list(Prop) ->
+    case store_fax_v(Prop) of
+        true -> wh_api:build_message(Prop, ?STORE_FAX_HEADERS, ?OPTIONAL_STORE_FAX_HEADERS);
+        false -> {error, "Proplist failed validation for store_fax"}
+    end;
+store_fax(JObj) ->
+    store_fax(wh_json:to_proplist(JObj)).
+
+-spec store_fax_v/1 :: (api_terms()) -> boolean().
+store_fax_v(Prop) when is_list(Prop) ->
+    wh_api:validate(Prop, ?STORE_FAX_HEADERS, ?STORE_FAX_VALUES, ?STORE_FAX_TYPES);
+store_fax_v(JObj) ->
+    store_fax_v(wh_json:to_proplist(JObj)).
 
 %%--------------------------------------------------------------------
 %% @doc Hangup a call - see wiki
@@ -744,7 +816,7 @@ originate_execute_v(JObj) ->
 -spec error/1 :: (api_terms()) -> api_formatter_return().
 error(Prop) when is_list(Prop) ->
     case error_v(Prop) of
-        true -> wh_api:build_message(Prop, ?ERROR_RESP_HEADERS, ?OPTIONAL_ERROR_RESP_HEADERS);
+        true ->  wh_api:build_message(Prop, ?ERROR_RESP_HEADERS, ?OPTIONAL_ERROR_RESP_HEADERS);
         false -> {error, "Proplist failed validation for error_req"}
     end;
 error(JObj) ->
@@ -770,8 +842,8 @@ publish_command(CtrlQ, Prop, DPApp) ->
         BuildMsgFun ->
             case lists:keyfind(BuildMsgFun, 1, ?MODULE:module_info(exports)) of
                 false -> {error, invalid_dialplan_object};
-                {_, 1} -> 
-                    {ok, Payload} = ?MODULE:BuildMsgFun(Prop),                    
+                {_, 1} ->
+                    {ok, Payload} = ?MODULE:BuildMsgFun(wh_api:set_missing_values(Prop, ?DEFAULT_VALUES)),
                     amqp_util:callctl_publish(CtrlQ, Payload, ?DEFAULT_CONTENT_TYPE)                
             end
     catch
@@ -784,6 +856,14 @@ publish_action(Queue, JSON) ->
     publish_action(Queue, JSON, ?DEFAULT_CONTENT_TYPE).
 publish_action(Queue, Payload, ContentType) ->
     amqp_util:callctl_publish(Queue, Payload, ContentType).
+
+-spec publish_error/2 :: (ne_binary(), iolist()) -> 'ok'.
+-spec publish_error/3 :: (ne_binary(), iolist(), ne_binary()) -> 'ok'.
+publish_error(CallID, JObj) ->
+    publish_error(CallID, JObj, ?DEFAULT_CONTENT_TYPE).
+publish_error(CallID, API, ContentType) ->
+    {ok, Payload} = wh_api:prepare_api_payload(API, [{<<"Event-Name">>, <<"dialplan">>} | ?ERROR_RESP_VALUES], fun ?MODULE:error/1),
+    amqp_util:callevt_publish(CallID, Payload, event, ContentType).
 
 -spec publish_event/2 :: (ne_binary(), iolist()) -> 'ok'.
 -spec publish_event/3 :: (ne_binary(), iolist(), ne_binary()) -> 'ok'.
@@ -807,6 +887,12 @@ publish_originate_execute(ServerId, JObj) ->
 publish_originate_execute(ServerId, API, ContentType) ->
     {ok, Payload} = wh_api:prepare_api_payload(API, ?ORIGINATE_EXECUTE_VALUES, fun ?MODULE:originate_execute/1),
     amqp_util:targeted_publish(ServerId, Payload, ContentType).
+
+dial_method_single() ->
+    ?DIAL_METHOD_SINGLE.
+
+dial_method_simultaneous() ->
+    ?DIAL_METHOD_SIMUL.
 
 bind_q(Queue, _Prop) ->
     _ = amqp_util:callctl_exchange(),
